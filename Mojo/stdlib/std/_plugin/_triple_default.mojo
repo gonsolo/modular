@@ -18,6 +18,7 @@ from ._trait import DefaultPlugin, StdPlugin
 from .cuda import CUDAPlugin
 from .hip import HIPPlugin
 from .metal import MetalPlugin
+from .spirv import SPIRVPlugin
 
 # mblack joins this chain onto one long line.
 # fmt: off
@@ -25,6 +26,7 @@ comptime _default_std_plugin[target: CompilationTarget]: StdPlugin = (
     CUDAPlugin if target.is_nvidia_gpu()
     else HIPPlugin if target.is_amd_gpu()
     else MetalPlugin if target.is_apple_gpu()
+    else SPIRVPlugin if target.is_intel_gpu()
     else DefaultPlugin
 )
 """The plugin for a target with no `opaque_plugin` payload, chosen by its

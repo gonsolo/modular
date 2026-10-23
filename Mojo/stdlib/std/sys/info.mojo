@@ -811,6 +811,26 @@ struct CompilationTarget[_mlir_value: _TargetType = _current_target(), //](
         else:
             return is_apple
 
+    # NOTE: Uses a sentinel instead of Optional to avoid recursive elaboration.
+    # TODO(MOCO-5022): Make these @staticmethod's once side effect bug is fixed
+    @inline(.nodebug)
+    def is_intel_gpu[subarch: StaticString = _ANY](self) -> Bool:
+        """Returns True if the target is an Intel GPU (`spirv64` SPIR-V), and
+        optionally if the target is also the specified sub-architecture.
+
+        Parameters:
+            subarch: The subarchitecture (e.g. bmg) (defaults to any).
+
+        Returns:
+            True if the triple target is SPIR-V and False otherwise.
+        """
+        comptime is_intel = Self._is_triple_arch["spirv64"]()
+
+        comptime if not StringLiteral._from[subarch]()._is_identical(_ANY):
+            return is_intel and Self._is_arch[subarch]()
+        else:
+            return is_intel
+
     # ===----------------------------------------------------------------------=== #
     # Nvidia Architectures
     # ===----------------------------------------------------------------------=== #
@@ -1134,6 +1154,21 @@ def is_apple_gpu[subarch: StaticString = _ANY]() -> Bool:
         True if the current compilation target is an Apple GPU.
     """
     return CompilationTarget.current().is_apple_gpu[subarch]()
+
+
+@inline(.nodebug)
+def is_intel_gpu[subarch: StaticString = _ANY]() -> Bool:
+    """Checks whether the current compilation target is an Intel GPU.
+
+    Equivalent to `CompilationTarget.current().is_intel_gpu[subarch]()`.
+
+    Parameters:
+        subarch: The GPU sub-architecture to check for.
+
+    Returns:
+        True if the current compilation target is an Intel GPU.
+    """
+    return CompilationTarget.current().is_intel_gpu[subarch]()
 
 
 comptime _AMD_GCN_ARCHS: List[StaticString] = [
