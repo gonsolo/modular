@@ -41,5 +41,6 @@ llvm_configure.configure(
         "AMDGPU",
         "Hexagon",
         "NVPTX",
+        "SPIRV",
     ],
 )
