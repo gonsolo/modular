@@ -11,11 +11,22 @@
 # ===----------------------------------------------------------------------=== #
 
 from std._gpu.primitives.id import _GPUIdPluginHookFnType, _is_cluster_id
-from std._plugin._trait import TargetDeviceKind, PluginHooks, StdPlugin
+from std._plugin._trait import (
+    TargetDeviceKind,
+    PluginHooks,
+    StdPlugin,
+    _PrintEmitPluginHookFnType,
+)
 from std.collections import OptionalReg
 from std.collections.string.string_span import _get_kgen_string
-from std.ffi import external_call
+from std.ffi import CStringSpan, external_call
+from std.io.file_descriptor import RawFileDescriptor
 from std.sys.info import CompilationTarget
+
+
+def _drop_print[O: Origin](cstr: CStringSpan[O], file: RawFileDescriptor):
+    # TODO: OpenCL printf needs its format string in the constant space.
+    pass
 
 
 @inline(.always)
@@ -66,3 +77,5 @@ struct SPIRVPluginHooks[target: CompilationTarget](PluginHooks):
     comptime gpu_id_fn[name: StaticString, dim: StaticString]: OptionalReg[
         _GPUIdPluginHookFnType
     ] = _spirv_gpu_id_fn[name, dim]()
+
+    comptime print_emit_fn: OptionalReg[_PrintEmitPluginHookFnType] = _drop_print
