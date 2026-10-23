@@ -69,6 +69,8 @@ def _bundle_file_type[target: CompilationTarget]() -> StaticString:
         return "hsaco"
     if target.is_triple["nvptx64-nvidia-cuda"]():
         return "cubin"
+    if _Target._is_triple_arch["spirv64"]():
+        return "spirv"
     return "object"
 
 
