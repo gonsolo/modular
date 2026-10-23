@@ -122,6 +122,8 @@ ImplNode::ImplNode(ParamNode *parent)
 }
 
 void ImplNode::setToError(ErrorTree &&err) {
+  if (error && getenv("KGEN_KEEP_FIRST_ERROR"))
+    return;
   if (error) {
 #ifndef MODULAR_PRODUCTION
     std::lock_guard<std::mutex> guard(getGlobalMutex());
