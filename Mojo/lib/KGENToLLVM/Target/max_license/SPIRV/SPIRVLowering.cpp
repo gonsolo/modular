@@ -67,6 +67,18 @@ struct SPIRVAddressSpacePass
                                           /*replaceTypes=*/true);
 
     auto generic = LLVM::LLVMPointerType::get(ctx, kGenericAS);
+    module.walk([&](LLVM::AllocaOp alloca) {
+      if (alloca.getType().getAddressSpace() != kGenericAS)
+        return;
+      alloca.getResult().setType(LLVM::LLVMPointerType::get(ctx, kFunctionAS));
+      OpBuilder b(alloca->getBlock(), std::next(alloca->getIterator()));
+      auto cast = LLVM::AddrSpaceCastOp::create(b, alloca.getLoc(), generic,
+                                                alloca.getResult());
+      alloca.getResult().replaceUsesWithIf(cast, [&](OpOperand &use) {
+        Operation *user = use.getOwner();
+        return user != cast && !isa<LLVM::LifetimeStartOp, LLVM::LifetimeEndOp>(user);
+      });
+    });
     module.walk([&](LLVM::AddressOfOp addr) {
       auto it = globalSpaces.find(addr.getGlobalNameAttr().getAttr());
       if (it == globalSpaces.end() || it->second != 0)
@@ -80,6 +92,7 @@ struct SPIRVAddressSpacePass
     });
 
     module.walk([&](LLVM::LLVMFuncOp func) {
+      func->removeAttr("kgen.spirv.max_work_group_size");
       if (func.getCConv() != LLVM::cconv::CConv::SPIR_KERNEL || func.isExternal())
         return;
       Block &entry = func.getBody().front();
