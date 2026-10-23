@@ -461,6 +461,19 @@ http_archive(
     url = "https://github.com/ROCm/rocm-systems/archive/refs/tags/therock-7.11.tar.gz",
 )
 
+# ......................... Level Zero ......................................
+#
+# The Level Zero HAL plugin (Target/lib/LevelZero/) loads libze_loader.so at
+# runtime via dlopen; only the headers are needed at build time.
+
+http_archive(
+    name = "level_zero_include",
+    build_file = "//bazel/public-patches:level_zero_include.BUILD",
+    sha256 = "b658d3be89b2ea3c5e6b3214592acb58a4875e738184b1a4cc7e9cf878b5f7b9",
+    strip_prefix = "level-zero-1.32.0",
+    url = "https://github.com/oneapi-src/level-zero/archive/refs/tags/v1.32.0.tar.gz",
+)
+
 # ......................... CUDA CUPTI (Tracy GPU profiling) ..................
 #
 # Tracy's TracyCUDA.hpp includes <cupti.h> for CUDA GPU profiling support.
