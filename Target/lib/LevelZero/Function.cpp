@@ -20,6 +20,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -93,7 +94,9 @@ M_driver_function::load(M_driver_context &ctx, M_driver_runtime_bundle_t bundle,
       r != ZE_RESULT_SUCCESS)
     return tl::unexpected(zeErrorStatus(&ctx.getDevice().getDriver(), r,
                                         "zeKernelCreate " + llvm::Twine(name)));
-  return new M_driver_function(ctx, kernel);
+  auto *func = new M_driver_function(ctx, kernel);
+  func->name = name;
+  return func;
 }
 
 M_driver_status_t M_driver_function::unload(M_driver_function_t func) {
@@ -134,5 +137,10 @@ M_driver_function::launch(M_driver_queue &queue,
           queue.list, kernel, &groups, nullptr, 0, nullptr);
       r != ZE_RESULT_SUCCESS)
     return zeErrorStatus(&driver, r, "zeCommandListAppendLaunchKernel");
+  // MODULAR_L0_SYNC_LAUNCH=1: wait for each kernel, so a fault names the kernel that caused it.
+  static const bool syncLaunch = getenv("MODULAR_L0_SYNC_LAUNCH") != nullptr;
+  if (syncLaunch)
+    if (ze_result_t r = ze.zeCommandListHostSynchronize(queue.list, UINT64_MAX); r != ZE_RESULT_SUCCESS)
+      return zeErrorStatus(&driver, r, "kernel " + llvm::Twine(name));
   return M_DRIVER_STATUS_SUCCESS;
 }

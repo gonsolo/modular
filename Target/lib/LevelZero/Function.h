@@ -21,6 +21,7 @@
 #include "HAL/M_driver_queue.h"
 
 #include <mutex>
+#include <string>
 
 struct M_driver_context;
 struct M_driver_queue;
@@ -41,6 +42,7 @@ struct M_driver_function {
   /// Arguments and group size live on the kernel object until the launch is
   /// appended, so launches of one function are serialized.
   std::mutex launchMutex;
+  std::string name;
 
   M_driver_function(M_driver_context &context, ze_kernel_handle_t kernel)
       : context(context), kernel(kernel) {}
