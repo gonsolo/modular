@@ -71,6 +71,7 @@ public:
   }
   M_driver_status_t freePinned(M_driver_memory_t memory);
   M_driver_status_t freeSync(M_driver_memory_t memory);
+  ze_result_t deferFree(void *ptr);
   M_driver_status_t copyToDeviceSync(M_driver_memory_t dst, uint64_t dstOffset,
                                      const void *src, uint64_t size);
   M_driver_status_t copyFromDeviceSync(void *dst, M_driver_memory_t src,

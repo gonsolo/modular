@@ -41,6 +41,7 @@
   ZE_FN(zeMemAllocDevice)                                                      \
   ZE_FN(zeMemAllocHost)                                                        \
   ZE_FN(zeMemFree)                                                             \
+  ZE_FN(zeMemFreeExt)                                                          \
   ZE_FN(zeCommandListCreateImmediate)                                          \
   ZE_FN(zeCommandListDestroy)                                                  \
   ZE_FN(zeCommandListHostSynchronize)                                          \

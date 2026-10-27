@@ -144,14 +144,21 @@ M_driver_status_t M_driver_context::memoryInfo(uint64_t *free,
   return M_DRIVER_STATUS_SUCCESS;
 }
 
+// zeMemFree is not ordered after queued work (cuMemFree synchronizes): free once the device is done with it.
+ze_result_t M_driver_context::deferFree(void *ptr) {
+  ze_memory_free_ext_desc_t desc =
+      zeDesc<ze_memory_free_ext_desc_t>(ZE_STRUCTURE_TYPE_MEMORY_FREE_EXT_DESC);
+  desc.freePolicy = ZE_DRIVER_MEMORY_FREE_POLICY_EXT_FLAG_DEFER_FREE;
+  return ze().zeMemFreeExt(zeContext, &desc, ptr);
+}
+
 M_driver_status_t M_driver_context::freePinned(M_driver_memory_t memory) {
   if (memory == nullptr)
     return M_DRIVER_STATUS_SUCCESS;
   if (!memory->hostAccessible)
     return M_DRIVER_STATUS_BAD_MEMORY;
-  if (ze_result_t r = ze().zeMemFree(zeContext, memory->ptr);
-      r != ZE_RESULT_SUCCESS)
-    return zeErrorStatus(&device.getDriver(), r, "zeMemFree");
+  if (ze_result_t r = deferFree(memory->ptr); r != ZE_RESULT_SUCCESS)
+    return zeErrorStatus(&device.getDriver(), r, "zeMemFreeExt");
   delete memory;
   return M_DRIVER_STATUS_SUCCESS;
 }
@@ -160,9 +167,8 @@ M_driver_status_t M_driver_context::freeSync(M_driver_memory_t memory) {
   if (memory == nullptr)
     return M_DRIVER_STATUS_SUCCESS;
   if (memory->owning) {
-    if (ze_result_t r = ze().zeMemFree(zeContext, memory->ptr);
-        r != ZE_RESULT_SUCCESS)
-      return zeErrorStatus(&device.getDriver(), r, "zeMemFree");
+    if (ze_result_t r = deferFree(memory->ptr); r != ZE_RESULT_SUCCESS)
+      return zeErrorStatus(&device.getDriver(), r, "zeMemFreeExt");
     allocatedBytes -= std::min<uint64_t>(memory->size, allocatedBytes.load());
   }
   delete memory;
