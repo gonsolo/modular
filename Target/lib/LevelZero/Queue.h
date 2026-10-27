@@ -60,6 +60,7 @@ struct M_driver_queue {
     return M_DRIVER_STATUS_UNIMPLEMENTED;
   }
   M_driver_status_t synchronize();
+  bool isPageable(const void *ptr);
 
 private:
   M_driver_status_t check(ze_result_t r, llvm::Twine const &what);

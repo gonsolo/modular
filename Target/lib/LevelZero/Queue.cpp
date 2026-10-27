@@ -52,23 +52,37 @@ M_driver_status_t M_driver_queue::check(ze_result_t r, llvm::Twine const &what) 
   return zeErrorStatus(&context.getDevice().getDriver(), r, what);
 }
 
+// As with CUDA, a copy to or from pageable host memory is done when the call returns: callers may free or read it then.
+bool M_driver_queue::isPageable(const void *ptr) {
+  ze_memory_allocation_properties_t props =
+      zeDesc<ze_memory_allocation_properties_t>(ZE_STRUCTURE_TYPE_MEMORY_ALLOCATION_PROPERTIES);
+  return context.ze().zeMemGetAllocProperties(context.zeContext, ptr, &props, nullptr) != ZE_RESULT_SUCCESS ||
+         props.type == ZE_MEMORY_TYPE_UNKNOWN;
+}
+
 M_driver_status_t M_driver_queue::copyToDevice(M_driver_memory_t dst,
                                                uint64_t dstOffset,
                                                const void *src, uint64_t size) {
-  return check(context.ze().zeCommandListAppendMemoryCopy(
-                   list, offsetPtr(dst, dstOffset), src, size, nullptr, 0,
-                   nullptr),
-               "zeCommandListAppendMemoryCopy to device");
+  if (M_driver_status_t s = check(context.ze().zeCommandListAppendMemoryCopy(
+                                     list, offsetPtr(dst, dstOffset), src, size,
+                                     nullptr, 0, nullptr),
+                                 "zeCommandListAppendMemoryCopy to device");
+      s != M_DRIVER_STATUS_SUCCESS)
+    return s;
+  return isPageable(src) ? synchronize() : M_DRIVER_STATUS_SUCCESS;
 }
 
 M_driver_status_t M_driver_queue::copyFromDevice(void *dst,
                                                  M_driver_memory_t src,
                                                  uint64_t srcOffset,
                                                  uint64_t size) {
-  return check(context.ze().zeCommandListAppendMemoryCopy(
-                   list, dst, offsetPtr(src, srcOffset), size, nullptr, 0,
-                   nullptr),
-               "zeCommandListAppendMemoryCopy from device");
+  if (M_driver_status_t s = check(context.ze().zeCommandListAppendMemoryCopy(
+                                     list, dst, offsetPtr(src, srcOffset), size,
+                                     nullptr, 0, nullptr),
+                                 "zeCommandListAppendMemoryCopy from device");
+      s != M_DRIVER_STATUS_SUCCESS)
+    return s;
+  return isPageable(dst) ? synchronize() : M_DRIVER_STATUS_SUCCESS;
 }
 
 M_driver_status_t M_driver_queue::copyIntraDevice(M_driver_memory_t dst,
