@@ -41,6 +41,16 @@ PATCHES = [
     # flag names an @llvm-project label. Parsing such a flag fetches the LLVM
     # source before analysis can start.
     "//bazel/public-patches:llvm-flag-defaults.patch",
+    # SPIR-V: pointee types of pointers extracted from or inserted into
+    # aggregates (upstream 664b5b451, after LLVM_COMMIT).
+    # https://github.com/llvm/llvm-project/pull/227599
+    "//bazel/public-patches:llvm-spirv-aggregate-pointee-types.patch",
+    # SPIR-V: aggregate PHI/select/freeze arms as typed value-ids. With the
+    # patch above, the SPIR-V backend needs no IR workarounds.
+    # https://github.com/llvm/llvm-project/pull/236368
+    # https://github.com/llvm/llvm-project/pull/236369
+    # https://github.com/llvm/llvm-project/pull/236370
+    "//bazel/public-patches:llvm-spirv-aggregate-value-ids.patch",
 ]
 
 # Upstream lit test inputs that no target reads: about three quarters of the

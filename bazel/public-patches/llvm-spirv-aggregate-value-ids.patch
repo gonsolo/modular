@@ -1,0 +1,70 @@
+diff --git a/llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp b/llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp
+index 9b45b9ebc..65eb5f95f 100644
+--- a/llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp
++++ b/llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp
+@@ -1786,6 +1786,8 @@ static bool isAggregateValueIdInstr(const Instruction &I) {
+ // arm matches the result once it is mutated to a value-id.
+ void SPIRVEmitIntrinsicsImpl::insertCompositeAggregateArms(Instruction *I,
+                                                            IRBuilder<> &B) {
++  bool HasPoisonExt = TM.getSubtargetImpl(*CurrF)->canUseExtension(
++      SPIRV::Extension::SPV_KHR_poison_freeze);
+   auto *Phi = dyn_cast<PHINode>(I);
+   for (Use &U : I->operands()) {
+     Value *Op = U.get();
+@@ -1802,6 +1804,15 @@ void SPIRVEmitIntrinsicsImpl::insertCompositeAggregateArms(Instruction *I,
+     for (unsigned Idx = 0, E = AggrTy->getNumElements(); Idx != E; ++Idx) {
+       Value *Field = B.CreateExtractValue(Op, Idx);
+       Composite = B.CreateInsertValue(Composite, Field, Idx);
++      // Start from a typed placeholder, as preprocessUndefsAndPoisons would
++      // have: a bare poison becomes the uniqued i32 undef in
++      // visitInsertValueInst and merges with any genuine i32 undef.
++      if (auto *First = dyn_cast<InsertValueInst>(Composite); First && !Idx) {
++        B.SetInsertPoint(First);
++        First->setOperand(0, lowerUndefOrPoison(First->getAggregateOperand(), B,
++                                                HasPoisonExt));
++        B.SetInsertPoint(First->getNextNode());
++      }
+     }
+     U.set(Composite);
+   }
+@@ -2550,14 +2561,21 @@ SPIRVEmitIntrinsicsImpl::visitExtractValueInst(ExtractValueInst &I) {
+   Instruction *NewI = B.CreateIntrinsicWithoutFolding(Intrinsic::spv_extractv,
+                                                       {I.getType()}, {Args});
+   // If this aggregate extract feeds another insertvalue, the extracted
+-  // composite is used as a SPIR-V value-id by llvm.spv.insertv. Keep the real
+-  // aggregate type in metadata, but expose the value itself as i32 so the
+-  // intrinsic signature remains valid.
+-  if (NewI->getType()->isAggregateType() &&
+-      any_of(I.users(), [](User *U) { return isa<InsertValueInst>(U); })) {
++  // composite is used as a SPIR-V value-id by llvm.spv.insertv. An aggregate
++  // PHI, select or freeze has already been mutated to an i32 value-id, so it
++  // needs the same. Keep the real aggregate type in metadata, but expose the
++  // value itself as i32 so the intrinsic signature and the user stay valid.
++  if (NewI->getType()->isAggregateType() && any_of(I.users(), [](User *U) {
++        return isa<InsertValueInst>(U) || isa<PHINode>(U) ||
++               isa<SelectInst>(U) || isa<FreezeInst>(U);
++      })) {
+     AggrConstTypes[NewI] = I.getType();
+     NewI->mutateType(B.getInt32Ty());
+     replaceMemInstrUses(&I, NewI, B);
++    // The aggregate extractvalue only carried a name record; unlike a PHI, a
++    // select or freeze does not pass its type down to an untyped operand.
++    setInsertPointAfterDef(B, NewI);
++    GR->buildAssignType(B, I.getType(), NewI, CanUseAnyVectorRank);
+     return NewI;
+   }
+   replaceAllUsesWithAndErase(B, &I, NewI);
+@@ -3899,6 +3917,13 @@ bool SPIRVEmitIntrinsicsImpl::runOnFunction(Function &Func) {
+       continue;
+     // Give multi-register arms a value-id first, before the result is mutated.
+     insertCompositeAggregateArms(&I, B);
++    // Every arm has the result's type. A constant arm's deduced type can be a
++    // distinct struct with typed pointer members (pointee types deduced in
++    // another function), which would no longer match.
++    for (Value *Op : I.operands())
++      if (auto *OpI = dyn_cast<Instruction>(Op))
++        if (auto It = AggrConstTypes.find(OpI); It != AggrConstTypes.end())
++          It->second = I.getType();
+     AggrConstTypes[&I] = I.getType();
+     I.mutateType(I32Ty);
+   }
