@@ -125,32 +125,6 @@ void scalarizeAggregatePhisAndSelects(llvm::Module &module) {
   }
 }
 
-/// Stores `value` field by field, for aggregate stores the SPIR-V backend
-/// rejects (anything but an extractvalue).
-// IGC cannot extract an aggregate member whole (its emitter copies into a register it never allocated): rebuild
-// every aggregate-typed extractvalue from its leaves.
-void scalarizeAggregateExtracts(llvm::Module &module) {
-  llvm::SmallVector<llvm::ExtractValueInst *> worklist;
-  for (llvm::Function &func : module)
-    for (llvm::BasicBlock &block : func)
-      for (llvm::Instruction &inst : block)
-        if (auto *extract = llvm::dyn_cast<llvm::ExtractValueInst>(&inst))
-          if (extract->getType()->isAggregateType())
-            worklist.push_back(extract);
-  for (llvm::ExtractValueInst *extract : worklist) {
-    llvm::IRBuilder<> b(extract);
-    llvm::Value *result = llvm::PoisonValue::get(extract->getType());
-    llvm::SmallVector<unsigned> path;
-    forEachLeaf(extract->getType(), path, [&](llvm::ArrayRef<unsigned> leaf) {
-      result = b.CreateInsertValue(result, extractLeaf(b, extract, leaf), leaf);
-    });
-    extract->replaceAllUsesWith(result);
-  }
-  for (llvm::ExtractValueInst *extract : llvm::reverse(worklist))
-    if (extract->use_empty())
-      extract->eraseFromParent();
-}
-
 // LLVM's SPIR-V backend infers pointee types, and can give a pointer extracted from (or inserted into) a struct a
 // different one than the member's: invalid SPIR-V that crashes IGC. Route such values through an OpBitcast.
 void castCompositePointers(llvm::SmallVectorImpl<uint32_t> &words) {
@@ -220,6 +194,8 @@ void castCompositePointers(llvm::SmallVectorImpl<uint32_t> &words) {
   words.assign(out.begin(), out.end());
 }
 
+/// Stores `value` field by field, for aggregate stores the SPIR-V backend
+/// rejects (anything but an extractvalue).
 void storeFields(llvm::IRBuilder<> &b, llvm::Type *rootType, llvm::Value *root,
                  llvm::Value *ptr, llvm::SmallVectorImpl<unsigned> &path,
                  llvm::Type *type, llvm::Align align) {
@@ -315,7 +291,6 @@ public:
   ErrorOr<BufferRef> emitObject(llvm::Module &module,
                                 EmitContext &ctx) const override {
     scalarizeAggregatePhisAndSelects(module);
-    scalarizeAggregateExtracts(module);
     splitAggregateStores(module);
     if (auto path = llvm::sys::Process::GetEnv("MOJO_SPIRV_DUMP_IR")) {
       std::error_code ec;
