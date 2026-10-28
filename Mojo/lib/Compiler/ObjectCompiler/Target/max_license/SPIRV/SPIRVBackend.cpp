@@ -244,38 +244,6 @@ void storeFields(llvm::IRBuilder<> &b, llvm::Type *rootType, llvm::Value *root,
   }
 }
 
-// IGC turns a whole-struct load into a vector load bitcast to the struct, which its emitter cannot lower (null
-// destination): load field by field.
-void splitAggregateLoads(llvm::Module &module) {
-  const llvm::DataLayout &dl = module.getDataLayout();
-  llvm::SmallVector<llvm::LoadInst *> loads;
-  for (llvm::Function &func : module)
-    for (llvm::BasicBlock &block : func)
-      for (llvm::Instruction &inst : block)
-        if (auto *load = llvm::dyn_cast<llvm::LoadInst>(&inst))
-          if (load->getType()->isAggregateType())
-            loads.push_back(load);
-  for (llvm::LoadInst *load : loads) {
-    llvm::IRBuilder<> b(load);
-    llvm::Type *type = load->getType();
-    llvm::Value *result = llvm::PoisonValue::get(type);
-    llvm::SmallVector<unsigned> path;
-    forEachLeaf(type, path, [&](llvm::ArrayRef<unsigned> leaf) {
-      llvm::SmallVector<llvm::Value *> idx{b.getInt32(0)};
-      for (unsigned i : leaf)
-        idx.push_back(b.getInt32(i));
-      uint64_t offset = dl.getIndexedOffsetInType(type, idx);
-      llvm::LoadInst *field = b.CreateAlignedLoad(llvm::ExtractValueInst::getIndexedType(type, leaf),
-                                                  b.CreateInBoundsGEP(type, load->getPointerOperand(), idx),
-                                                  llvm::commonAlignment(load->getAlign(), offset));
-      field->setVolatile(load->isVolatile());
-      result = b.CreateInsertValue(result, field, leaf);
-    });
-    load->replaceAllUsesWith(result);
-    load->eraseFromParent();
-  }
-}
-
 void splitAggregateStores(llvm::Module &module) {
   llvm::SmallVector<llvm::StoreInst *> stores;
   for (llvm::Function &func : module)
@@ -522,7 +490,6 @@ public:
                                 EmitContext &ctx) const override {
     byvalStructKernelArgs(module);
     flattenNestedAggregateReturns(module);
-    splitAggregateLoads(module);
     scalarizeAggregatePhisAndSelects(module);
     scalarizeAggregateExtracts(module);
     splitAggregateStores(module);
