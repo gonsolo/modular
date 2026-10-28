@@ -263,107 +263,6 @@ void splitAggregateStores(llvm::Module &module) {
   }
 }
 
-/// The leaf of `value` at `path`, looking through insertvalue chains.
-llvm::Value *findLeaf(llvm::IRBuilder<> &b, llvm::Value *value, llvm::ArrayRef<unsigned> path) {
-  while (auto *insert = llvm::dyn_cast<llvm::InsertValueInst>(value)) {
-    llvm::ArrayRef<unsigned> idx = insert->getIndices();
-    if (idx.size() <= path.size() && llvm::equal(idx, path.take_front(idx.size()))) {
-      value = insert->getInsertedValueOperand();
-      path = path.drop_front(idx.size());
-      if (path.empty())
-        return value;
-    } else if (idx.size() > path.size() || !llvm::equal(idx.take_front(path.size()), path)) {
-      value = insert->getAggregateOperand();
-    } else {
-      break;
-    }
-  }
-  return path.empty() ? value : extractLeaf(b, value, path);
-}
-
-bool hasNestedAggregate(llvm::Type *type) {
-  if (!type->isAggregateType())
-    return false;
-  unsigned count = type->isStructTy() ? type->getStructNumElements() : type->getArrayNumElements();
-  for (unsigned i = 0; i < count; ++i)
-    if ((type->isStructTy() ? type->getStructElementType(i) : type->getArrayElementType())->isAggregateType())
-      return true;
-  return false;
-}
-
-// IGC garbles a nested struct returned from a function (the same SPIR-V is right when inlined): return a flat struct
-// of its leaves and rebuild the nested value at each call.
-void flattenNestedAggregateReturns(llvm::Module &module) {
-  llvm::SmallVector<llvm::Function *> funcs;
-  for (llvm::Function &func : module)
-    if (!func.isDeclaration() && func.getCallingConv() != llvm::CallingConv::SPIR_KERNEL &&
-        hasNestedAggregate(func.getReturnType()))
-      funcs.push_back(&func);
-  for (llvm::Function *old : funcs) {
-    llvm::Type *nested = old->getReturnType();
-    llvm::SmallVector<llvm::SmallVector<unsigned>> leaves;
-    llvm::SmallVector<llvm::Type *> leafTypes;
-    llvm::SmallVector<unsigned> path;
-    forEachLeaf(nested, path, [&](llvm::ArrayRef<unsigned> leaf) {
-      leaves.emplace_back(leaf);
-      leafTypes.push_back(llvm::ExtractValueInst::getIndexedType(nested, leaf));
-    });
-    auto *flat = llvm::StructType::get(module.getContext(), leafTypes);
-    auto *fty = llvm::FunctionType::get(flat, old->getFunctionType()->params(), old->isVarArg());
-    auto *func = llvm::Function::Create(fty, old->getLinkage(), old->getAddressSpace(), "", &module);
-    func->copyAttributesFrom(old);
-    func->copyMetadata(old, 0);
-    func->removeRetAttrs(llvm::AttributeFuncs::typeIncompatible(flat, {}));
-    func->splice(func->begin(), old);
-    for (auto [oldArg, arg] : llvm::zip(old->args(), func->args())) {
-      arg.takeName(&oldArg);
-      oldArg.replaceAllUsesWith(&arg);
-    }
-    for (llvm::BasicBlock &block : *func)
-      if (auto *ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator())) {
-        llvm::IRBuilder<> b(ret);
-        llvm::Value *result = llvm::PoisonValue::get(flat);
-        for (auto [i, leaf] : llvm::enumerate(leaves))
-          result = b.CreateInsertValue(result, findLeaf(b, ret->getReturnValue(), leaf), {unsigned(i)});
-        b.CreateRet(result);
-        ret->eraseFromParent();
-      }
-    llvm::SmallVector<llvm::CallInst *> calls;
-    for (llvm::User *user : old->users())
-      if (auto *call = llvm::dyn_cast<llvm::CallInst>(user); call && call->getCalledFunction() == old)
-        calls.push_back(call);
-    for (llvm::CallInst *call : calls) {
-      llvm::IRBuilder<> b(call);
-      llvm::SmallVector<llvm::Value *> args(call->args());
-      llvm::CallInst *newCall = b.CreateCall(func, args);
-      newCall->setCallingConv(call->getCallingConv());
-      newCall->setAttributes(call->getAttributes().removeRetAttributes(
-          module.getContext(), llvm::AttributeFuncs::typeIncompatible(flat, {})));
-      llvm::SmallVector<llvm::User *> users(call->users());
-      for (llvm::User *user : users)
-        if (auto *ev = llvm::dyn_cast<llvm::ExtractValueInst>(user);
-            ev && !ev->getType()->isAggregateType()) {
-          auto it = llvm::find_if(leaves, [&](auto &leaf) { return llvm::equal(leaf, ev->getIndices()); });
-          if (it != leaves.end()) {
-            llvm::IRBuilder<> eb(ev);
-            ev->replaceAllUsesWith(eb.CreateExtractValue(newCall, {unsigned(it - leaves.begin())}));
-            ev->eraseFromParent();
-          }
-        }
-      if (!call->use_empty()) {
-        llvm::Value *result = llvm::PoisonValue::get(nested);
-        for (auto [i, leaf] : llvm::enumerate(leaves))
-          result = b.CreateInsertValue(result, b.CreateExtractValue(newCall, {unsigned(i)}), leaf);
-        call->replaceAllUsesWith(result);
-      }
-      call->eraseFromParent();
-    }
-    func->takeName(old);
-    if (old->use_empty())
-      old->eraseFromParent();
-  }
-}
-
 // IGC misreads nested members of a struct kernel argument passed by value: pass it as clang does for OpenCL C, a byval
 // pointer, and read each extracted member through a GEP + load.
 void byvalStructKernelArgs(llvm::Module &module) {
@@ -469,7 +368,6 @@ public:
   ErrorOr<BufferRef> emitObject(llvm::Module &module,
                                 EmitContext &ctx) const override {
     byvalStructKernelArgs(module);
-    flattenNestedAggregateReturns(module);
     scalarizeAggregatePhisAndSelects(module);
     scalarizeAggregateExtracts(module);
     splitAggregateStores(module);
