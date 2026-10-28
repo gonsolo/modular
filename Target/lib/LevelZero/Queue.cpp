@@ -12,11 +12,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "Queue.h"
+
 #include "Context.h"
 #include "Device.h"
 #include "Driver.h"
 #include "Event.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 using M::Target::LevelZero::zeErrorStatus;
@@ -60,6 +63,16 @@ bool M_driver_queue::isPageable(const void *ptr) {
          props.type == ZE_MEMORY_TYPE_UNKNOWN;
 }
 
+// MODULAR_L0_SYNC_LAUNCH=1 also waits for each copy, so a fault reports the copy's addresses.
+M_driver_status_t M_driver_queue::debugSync(const char *what, const void *dst, const void *src, uint64_t size) {
+  static const bool sync = getenv("MODULAR_L0_SYNC_LAUNCH") != nullptr;
+  if (!sync)
+    return M_DRIVER_STATUS_SUCCESS;
+  char text[160];
+  snprintf(text, sizeof(text), "%s dst=%p src=%p size=%llu", what, dst, src, (unsigned long long)size);
+  return check(context.ze().zeCommandListHostSynchronize(list, UINT64_MAX), text);
+}
+
 M_driver_status_t M_driver_queue::copyToDevice(M_driver_memory_t dst,
                                                uint64_t dstOffset,
                                                const void *src, uint64_t size) {
@@ -67,6 +80,9 @@ M_driver_status_t M_driver_queue::copyToDevice(M_driver_memory_t dst,
                                      list, offsetPtr(dst, dstOffset), src, size,
                                      nullptr, 0, nullptr),
                                  "zeCommandListAppendMemoryCopy to device");
+      s != M_DRIVER_STATUS_SUCCESS)
+    return s;
+  if (M_driver_status_t s = debugSync("copy to device", offsetPtr(dst, dstOffset), src, size);
       s != M_DRIVER_STATUS_SUCCESS)
     return s;
   return isPageable(src) ? synchronize() : M_DRIVER_STATUS_SUCCESS;
@@ -82,6 +98,9 @@ M_driver_status_t M_driver_queue::copyFromDevice(void *dst,
                                  "zeCommandListAppendMemoryCopy from device");
       s != M_DRIVER_STATUS_SUCCESS)
     return s;
+  if (M_driver_status_t s = debugSync("copy from device", dst, offsetPtr(src, srcOffset), size);
+      s != M_DRIVER_STATUS_SUCCESS)
+    return s;
   return isPageable(dst) ? synchronize() : M_DRIVER_STATUS_SUCCESS;
 }
 
@@ -90,10 +109,13 @@ M_driver_status_t M_driver_queue::copyIntraDevice(M_driver_memory_t dst,
                                                   M_driver_memory_t src,
                                                   uint64_t srcOffset,
                                                   uint64_t size) {
-  return check(context.ze().zeCommandListAppendMemoryCopy(
-                   list, offsetPtr(dst, dstOffset), offsetPtr(src, srcOffset),
-                   size, nullptr, 0, nullptr),
-               "zeCommandListAppendMemoryCopy intra device");
+  if (M_driver_status_t s = check(context.ze().zeCommandListAppendMemoryCopy(
+                                     list, offsetPtr(dst, dstOffset), offsetPtr(src, srcOffset),
+                                     size, nullptr, 0, nullptr),
+                                 "zeCommandListAppendMemoryCopy intra device");
+      s != M_DRIVER_STATUS_SUCCESS)
+    return s;
+  return debugSync("copy intra device", offsetPtr(dst, dstOffset), offsetPtr(src, srcOffset), size);
 }
 
 M_driver_status_t M_driver_queue::setMemory(M_driver_memory_t dst,
