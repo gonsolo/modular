@@ -20,11 +20,7 @@
 
 #include "Mojo/ToolCommon/CompilationOptions.h"
 
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Constants.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
@@ -32,7 +28,6 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <atomic>
-#include <cstring>
 #include <mutex>
 
 namespace M::KGEN {
@@ -54,188 +49,6 @@ void enableIntelExtensions() {
       extensions += "," + *extra;
     it->second->addOccurrence(0, "spirv-ext", extensions);
   });
-}
-
-/// Calls `fn` with the index path of every scalar leaf of `type`.
-void forEachLeaf(llvm::Type *type, llvm::SmallVectorImpl<unsigned> &path,
-                 llvm::function_ref<void(llvm::ArrayRef<unsigned>)> fn) {
-  if (!type->isAggregateType())
-    return fn(path);
-  unsigned count = type->isStructTy() ? type->getStructNumElements()
-                                      : type->getArrayNumElements();
-  for (unsigned i = 0; i < count; ++i) {
-    path.push_back(i);
-    forEachLeaf(type->isStructTy() ? type->getStructElementType(i)
-                                   : type->getArrayElementType(),
-                path, fn);
-    path.pop_back();
-  }
-}
-
-/// Extracts the leaf at `path`, looking through aggregate-valued extractvalues.
-llvm::Value *extractLeaf(llvm::IRBuilder<> &b, llvm::Value *value,
-                         llvm::ArrayRef<unsigned> path) {
-  llvm::SmallVector<unsigned> indices(path);
-  while (auto *extract = llvm::dyn_cast<llvm::ExtractValueInst>(value)) {
-    indices.insert(indices.begin(), extract->idx_begin(), extract->idx_end());
-    value = extract->getAggregateOperand();
-  }
-  return b.CreateExtractValue(value, indices);
-}
-
-/// LLVM's SPIR-V backend replaces aggregate values by i32 placeholders and
-/// miscompiles aggregate phis and selects; rewrite them field by field.
-void scalarizeAggregatePhisAndSelects(llvm::Module &module) {
-  llvm::SmallVector<llvm::Instruction *> worklist;
-  for (llvm::Function &func : module)
-    for (llvm::BasicBlock &block : func)
-      for (llvm::Instruction &inst : block)
-        if ((llvm::isa<llvm::PHINode>(inst) || llvm::isa<llvm::SelectInst>(inst)) &&
-            inst.getType()->isAggregateType())
-          worklist.push_back(&inst);
-  for (llvm::Instruction *inst : worklist) {
-    llvm::Type *type = inst->getType();
-    llvm::IRBuilder<> b(inst);
-    if (llvm::isa<llvm::PHINode>(inst))
-      b.SetInsertPoint(inst->getParent()->getFirstNonPHIIt());
-    llvm::Value *result = llvm::PoisonValue::get(type);
-    llvm::SmallVector<unsigned> path;
-    forEachLeaf(type, path, [&](llvm::ArrayRef<unsigned> leaf) {
-      llvm::Value *scalar;
-      if (auto *phi = llvm::dyn_cast<llvm::PHINode>(inst)) {
-        llvm::IRBuilder<> pb(phi);
-        auto *leafPhi = pb.CreatePHI(llvm::ExtractValueInst::getIndexedType(type, leaf),
-                                     phi->getNumIncomingValues());
-        for (unsigned i = 0, e = phi->getNumIncomingValues(); i < e; ++i) {
-          llvm::IRBuilder<> eb(phi->getIncomingBlock(i)->getTerminator());
-          leafPhi->addIncoming(extractLeaf(eb, phi->getIncomingValue(i), leaf),
-                               phi->getIncomingBlock(i));
-        }
-        scalar = leafPhi;
-      } else {
-        auto *select = llvm::cast<llvm::SelectInst>(inst);
-        scalar = b.CreateSelect(select->getCondition(),
-                                extractLeaf(b, select->getTrueValue(), leaf),
-                                extractLeaf(b, select->getFalseValue(), leaf));
-      }
-      result = b.CreateInsertValue(result, scalar, leaf);
-    });
-    inst->replaceAllUsesWith(result);
-    inst->eraseFromParent();
-  }
-}
-
-// LLVM's SPIR-V backend infers pointee types, and can give a pointer extracted from (or inserted into) a struct a
-// different one than the member's: invalid SPIR-V that crashes IGC. Route such values through an OpBitcast.
-void castCompositePointers(llvm::SmallVectorImpl<uint32_t> &words) {
-  enum : uint32_t { TypeVector = 23, TypeArray = 28, TypeRuntimeArray = 29, TypeStruct = 30, TypePointer = 32,
-                    Function = 54, CompositeExtract = 81, CompositeInsert = 82, Bitcast = 124 };
-  if (words.size() < 5)
-    return;
-  llvm::DenseMap<uint32_t, llvm::SmallVector<uint32_t>> types;   // type id -> opcode, operands
-  llvm::DenseMap<uint32_t, uint32_t> resultType;                   // value id -> its type id
-  for (size_t i = 5; i < words.size();) {
-    uint32_t op = words[i] & 0xffff, n = words[i] >> 16;
-    if (n == 0 || i + n > words.size())
-      return;
-    if (op >= TypeVector && op <= TypePointer + 7 && n >= 2) {
-      llvm::SmallVector<uint32_t> t = {op};
-      t.append(words.begin() + i + 2, words.begin() + i + n);
-      types[words[i + 1]] = t;
-    } else if (n >= 3 && types.count(words[i + 1]) && !types.count(words[i + 2])) {
-      resultType[words[i + 2]] = words[i + 1];
-    }
-    i += n;
-  }
-  auto isPointer = [&](uint32_t t) { auto it = types.find(t); return it != types.end() && it->second[0] == TypePointer; };
-  auto member = [&](uint32_t t, llvm::ArrayRef<uint32_t> idx) -> uint32_t {
-    for (uint32_t k : idx) {
-      auto it = types.find(t);
-      if (it == types.end())
-        return 0;
-      uint32_t op = it->second[0];
-      if (op == TypeStruct && k + 1 < it->second.size())
-        t = it->second[k + 1];
-      else if (op == TypeArray || op == TypeRuntimeArray || op == TypeVector)
-        t = it->second[1];
-      else
-        return 0;
-    }
-    return t;
-  };
-  uint32_t bound = words[3];
-  llvm::SmallVector<uint32_t> out(words.begin(), words.begin() + 5);
-  for (size_t i = 5; i < words.size();) {
-    uint32_t op = words[i] & 0xffff, n = words[i] >> 16;
-    llvm::ArrayRef<uint32_t> inst(words.data() + i, n);
-    i += n;
-    if (op == CompositeExtract && n >= 5) {
-      uint32_t type = inst[1], id = inst[2], comp = inst[3];
-      uint32_t m = member(resultType.lookup(comp), inst.drop_front(4));
-      if (m && m != type && isPointer(m) && isPointer(type)) {
-        uint32_t tmp = bound++;
-        out.push_back(inst[0]); out.push_back(m); out.push_back(tmp); out.append(inst.begin() + 3, inst.end());
-        out.append({(4u << 16) | Bitcast, type, id, tmp});
-        continue;
-      }
-    } else if (op == CompositeInsert && n >= 6) {
-      uint32_t type = inst[1], obj = inst[3];
-      uint32_t m = member(type, inst.drop_front(5)), ot = resultType.lookup(obj);
-      if (m && ot && m != ot && isPointer(m) && isPointer(ot)) {
-        uint32_t tmp = bound++;
-        out.append({(4u << 16) | Bitcast, m, tmp, obj});
-        out.append(inst.begin(), inst.begin() + 3); out.push_back(tmp); out.append(inst.begin() + 4, inst.end());
-        continue;
-      }
-    }
-    out.append(inst.begin(), inst.end());
-  }
-  out[3] = bound;
-  words.assign(out.begin(), out.end());
-}
-
-/// Stores `value` field by field, for aggregate stores the SPIR-V backend
-/// rejects (anything but an extractvalue).
-void storeFields(llvm::IRBuilder<> &b, llvm::Type *rootType, llvm::Value *root,
-                 llvm::Value *ptr, llvm::SmallVectorImpl<unsigned> &path,
-                 llvm::Type *type, llvm::Align align) {
-  if (!type->isAggregateType()) {
-    llvm::SmallVector<llvm::Value *> indices = {b.getInt32(0)};
-    for (unsigned i : path)
-      indices.push_back(b.getInt32(i));
-    llvm::Value *field = b.CreateExtractValue(root, path);
-    b.CreateAlignedStore(field, b.CreateInBoundsGEP(rootType, ptr, indices),
-                         llvm::Align(1));
-    return;
-  }
-  unsigned count = type->isStructTy() ? type->getStructNumElements()
-                                      : type->getArrayNumElements();
-  for (unsigned i = 0; i < count; ++i) {
-    path.push_back(i);
-    llvm::Type *elem = type->isStructTy() ? type->getStructElementType(i)
-                                          : type->getArrayElementType();
-    storeFields(b, rootType, root, ptr, path, elem, align);
-    path.pop_back();
-  }
-}
-
-void splitAggregateStores(llvm::Module &module) {
-  llvm::SmallVector<llvm::StoreInst *> stores;
-  for (llvm::Function &func : module)
-    for (llvm::BasicBlock &block : func)
-      for (llvm::Instruction &inst : block)
-        if (auto *store = llvm::dyn_cast<llvm::StoreInst>(&inst))
-          if (store->getValueOperand()->getType()->isAggregateType() &&
-              !llvm::isa<llvm::ExtractValueInst>(store->getValueOperand()))
-            stores.push_back(store);
-  for (llvm::StoreInst *store : stores) {
-    llvm::IRBuilder<> b(store);
-    llvm::Value *value = store->getValueOperand();
-    llvm::SmallVector<unsigned> path;
-    storeFields(b, value->getType(), value, store->getPointerOperand(), path,
-                value->getType(), store->getAlign());
-    store->eraseFromParent();
-  }
 }
 
 class SPIRVBackend final : public HostBackend {
@@ -290,8 +103,6 @@ public:
 
   ErrorOr<BufferRef> emitObject(llvm::Module &module,
                                 EmitContext &ctx) const override {
-    scalarizeAggregatePhisAndSelects(module);
-    splitAggregateStores(module);
     if (auto path = llvm::sys::Process::GetEnv("MOJO_SPIRV_DUMP_IR")) {
       std::error_code ec;
       llvm::raw_fd_ostream os(*path, ec);
@@ -303,13 +114,6 @@ public:
             ctx.runLlc(module, *codeBuf, /*createObjectFile=*/true))
       return Error(Twine(err.getError()) +
                    ", llc failed to codegen LLVM IR to SPIR-V");
-    {
-      llvm::SmallVector<uint32_t> words(codeBuf->getBufferSize() / 4);
-      std::memcpy(words.data(), codeBuf->getBufferStart(), words.size() * 4);
-      castCompositePointers(words);
-      codeBuf = WriteableBuffer::get();
-      codeBuf->write(reinterpret_cast<const char *>(words.data()), words.size() * 4);
-    }
     if (auto dir = llvm::sys::Process::GetEnv("MOJO_SPIRV_DUMP_DIR")) {
       static std::atomic<unsigned> counter{0};
       std::error_code ec;
