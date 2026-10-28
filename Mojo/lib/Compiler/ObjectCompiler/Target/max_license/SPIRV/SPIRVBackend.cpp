@@ -23,7 +23,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/AttributeMask.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Metadata.h"
@@ -263,58 +262,6 @@ void splitAggregateStores(llvm::Module &module) {
   }
 }
 
-// IGC misreads nested members of a struct kernel argument passed by value: pass it as clang does for OpenCL C, a byval
-// pointer, and read each extracted member through a GEP + load.
-void byvalStructKernelArgs(llvm::Module &module) {
-  llvm::SmallVector<llvm::Function *> kernels;
-  for (llvm::Function &func : module)
-    if (func.getCallingConv() == llvm::CallingConv::SPIR_KERNEL && !func.isDeclaration() &&
-        llvm::any_of(func.args(), [](llvm::Argument &a) { return a.getType()->isAggregateType(); }))
-      kernels.push_back(&func);
-  const llvm::DataLayout &dl = module.getDataLayout();
-  for (llvm::Function *old : kernels) {
-    llvm::LLVMContext &ctx = module.getContext();
-    llvm::SmallVector<llvm::Type *> params;
-    for (llvm::Argument &a : old->args())
-      params.push_back(a.getType()->isAggregateType() ? llvm::PointerType::get(ctx, 0) : a.getType());
-    auto *fty = llvm::FunctionType::get(old->getReturnType(), params, old->isVarArg());
-    auto *func = llvm::Function::Create(fty, old->getLinkage(), old->getAddressSpace(), "", &module);
-    func->copyAttributesFrom(old);
-    func->copyMetadata(old, 0);
-    func->splice(func->begin(), old);
-    llvm::IRBuilder<> b(&*func->getEntryBlock().getFirstInsertionPt());
-    for (auto [oldArg, arg] : llvm::zip(old->args(), func->args())) {
-      arg.takeName(&oldArg);
-      if (!oldArg.getType()->isAggregateType()) {
-        oldArg.replaceAllUsesWith(&arg);
-        continue;
-      }
-      llvm::Type *type = oldArg.getType();
-      llvm::Align align = dl.getABITypeAlign(type);
-      func->removeParamAttrs(arg.getArgNo(), llvm::AttributeFuncs::typeIncompatible(arg.getType(), {}));
-      func->addParamAttr(arg.getArgNo(), llvm::Attribute::getWithByValType(ctx, type));
-      func->addParamAttr(arg.getArgNo(), llvm::Attribute::getWithAlignment(ctx, align));
-      llvm::SmallVector<llvm::User *> users(oldArg.users());
-      for (llvm::User *user : users) {
-        auto *ev = llvm::dyn_cast<llvm::ExtractValueInst>(user);
-        if (!ev)
-          continue;
-        llvm::IRBuilder<> eb(ev);
-        llvm::SmallVector<llvm::Value *> idx{eb.getInt32(0)};
-        for (unsigned i : ev->getIndices())
-          idx.push_back(eb.getInt32(i));
-        llvm::Value *gep = eb.CreateInBoundsGEP(type, &arg, idx);
-        ev->replaceAllUsesWith(eb.CreateLoad(ev->getType(), gep));
-        ev->eraseFromParent();
-      }
-      if (!oldArg.use_empty())
-        oldArg.replaceAllUsesWith(b.CreateAlignedLoad(type, &arg, align));
-    }
-    func->takeName(old);
-    old->eraseFromParent();
-  }
-}
-
 class SPIRVBackend final : public HostBackend {
 public:
   const TargetTraits *traits() const override { return &SPIRVTraits::get(); }
@@ -367,7 +314,6 @@ public:
 
   ErrorOr<BufferRef> emitObject(llvm::Module &module,
                                 EmitContext &ctx) const override {
-    byvalStructKernelArgs(module);
     scalarizeAggregatePhisAndSelects(module);
     scalarizeAggregateExtracts(module);
     splitAggregateStores(module);
