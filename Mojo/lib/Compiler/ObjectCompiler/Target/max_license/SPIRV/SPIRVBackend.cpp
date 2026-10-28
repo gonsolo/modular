@@ -281,17 +281,6 @@ llvm::Value *findLeaf(llvm::IRBuilder<> &b, llvm::Value *value, llvm::ArrayRef<u
   return path.empty() ? value : extractLeaf(b, value, path);
 }
 
-bool isNarrowInt(llvm::Type *type) { return type->isIntegerTy(1) || type->isIntegerTy(8); }
-
-bool hasNarrowIntLeaf(llvm::Type *type) {
-  bool found = false;
-  llvm::SmallVector<unsigned> path;
-  forEachLeaf(type, path, [&](llvm::ArrayRef<unsigned> leaf) {
-    found |= isNarrowInt(llvm::ExtractValueInst::getIndexedType(type, leaf));
-  });
-  return found;
-}
-
 bool hasNestedAggregate(llvm::Type *type) {
   if (!type->isAggregateType())
     return false;
@@ -303,14 +292,12 @@ bool hasNestedAggregate(llvm::Type *type) {
 }
 
 // IGC garbles a nested struct returned from a function (the same SPIR-V is right when inlined): return a flat struct
-// of its leaves and rebuild the nested value at each call. Bool and i8 leaves travel as i32: IGC makes a Bool leaf i8,
-// and its PromoteInt8Type has no case for an i8 extractvalue, looping forever when one feeds i8 arithmetic.
+// of its leaves and rebuild the nested value at each call.
 void flattenNestedAggregateReturns(llvm::Module &module) {
   llvm::SmallVector<llvm::Function *> funcs;
   for (llvm::Function &func : module)
     if (!func.isDeclaration() && func.getCallingConv() != llvm::CallingConv::SPIR_KERNEL &&
-        func.getReturnType()->isAggregateType() &&
-        (hasNestedAggregate(func.getReturnType()) || hasNarrowIntLeaf(func.getReturnType())))
+        hasNestedAggregate(func.getReturnType()))
       funcs.push_back(&func);
   for (llvm::Function *old : funcs) {
     llvm::Type *nested = old->getReturnType();
@@ -319,8 +306,7 @@ void flattenNestedAggregateReturns(llvm::Module &module) {
     llvm::SmallVector<unsigned> path;
     forEachLeaf(nested, path, [&](llvm::ArrayRef<unsigned> leaf) {
       leaves.emplace_back(leaf);
-      llvm::Type *t = llvm::ExtractValueInst::getIndexedType(nested, leaf);
-      leafTypes.push_back(isNarrowInt(t) ? llvm::Type::getInt32Ty(module.getContext()) : t);
+      leafTypes.push_back(llvm::ExtractValueInst::getIndexedType(nested, leaf));
     });
     auto *flat = llvm::StructType::get(module.getContext(), leafTypes);
     auto *fty = llvm::FunctionType::get(flat, old->getFunctionType()->params(), old->isVarArg());
@@ -338,8 +324,7 @@ void flattenNestedAggregateReturns(llvm::Module &module) {
         llvm::IRBuilder<> b(ret);
         llvm::Value *result = llvm::PoisonValue::get(flat);
         for (auto [i, leaf] : llvm::enumerate(leaves))
-          result = b.CreateInsertValue(result, b.CreateZExtOrBitCast(findLeaf(b, ret->getReturnValue(), leaf), leafTypes[i]),
-                                       {unsigned(i)});
+          result = b.CreateInsertValue(result, findLeaf(b, ret->getReturnValue(), leaf), {unsigned(i)});
         b.CreateRet(result);
         ret->eraseFromParent();
       }
@@ -361,19 +346,14 @@ void flattenNestedAggregateReturns(llvm::Module &module) {
           auto it = llvm::find_if(leaves, [&](auto &leaf) { return llvm::equal(leaf, ev->getIndices()); });
           if (it != leaves.end()) {
             llvm::IRBuilder<> eb(ev);
-            ev->replaceAllUsesWith(
-                eb.CreateTruncOrBitCast(eb.CreateExtractValue(newCall, {unsigned(it - leaves.begin())}), ev->getType()));
+            ev->replaceAllUsesWith(eb.CreateExtractValue(newCall, {unsigned(it - leaves.begin())}));
             ev->eraseFromParent();
           }
         }
       if (!call->use_empty()) {
         llvm::Value *result = llvm::PoisonValue::get(nested);
         for (auto [i, leaf] : llvm::enumerate(leaves))
-          result = b.CreateInsertValue(
-              result,
-              b.CreateTruncOrBitCast(b.CreateExtractValue(newCall, {unsigned(i)}),
-                                     llvm::ExtractValueInst::getIndexedType(nested, leaf)),
-              leaf);
+          result = b.CreateInsertValue(result, b.CreateExtractValue(newCall, {unsigned(i)}), leaf);
         call->replaceAllUsesWith(result);
       }
       call->eraseFromParent();
