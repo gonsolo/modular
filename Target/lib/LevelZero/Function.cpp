@@ -20,11 +20,50 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <string>
+#include <vector>
 
 using M::Target::LevelZero::zeErrorStatus;
+
+namespace {
+// MODULAR_L0_KERNEL_TIMES=1: wait for each kernel and print the time per kernel at exit.
+struct KernelTimes {
+  std::mutex mutex;
+  std::map<std::string, std::pair<uint64_t, double>> byName;
+
+  void add(const std::string &name, double seconds) {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto &entry = byName[name.substr(0, name.find('('))];
+    entry.first++;
+    entry.second += seconds;
+  }
+
+  ~KernelTimes() {
+    std::vector<std::pair<double, const std::string *>> rows;
+    double total = 0;
+    for (auto &[name, entry] : byName) {
+      rows.push_back({entry.second, &name});
+      total += entry.second;
+    }
+    std::sort(rows.rbegin(), rows.rend());
+    for (auto &[seconds, name] : rows)
+      fprintf(stderr, "%9.3f s %5.1f%% %8llu  %s\n", seconds, 100 * seconds / total,
+              (unsigned long long)byName[*name].first, name->c_str());
+  }
+};
+
+KernelTimes &kernelTimes() {
+  static KernelTimes times;
+  return times;
+}
+} // namespace
 
 static constexpr uint32_t kSPIRVMagic = 0x07230203;
 
@@ -133,14 +172,18 @@ M_driver_function::launch(M_driver_queue &queue,
                            "zeKernelSetArgumentValue " + llvm::Twine(i) +
                                " size " + llvm::Twine(arg_sizes[i]));
   ze_group_count_t groups = {gpu.grid.x, gpu.grid.y, gpu.grid.z};
+  static const bool timeKernels = getenv("MODULAR_L0_KERNEL_TIMES") != nullptr;
+  auto start = std::chrono::steady_clock::now();
   if (ze_result_t r = ze.zeCommandListAppendLaunchKernel(
           queue.list, kernel, &groups, nullptr, 0, nullptr);
       r != ZE_RESULT_SUCCESS)
     return zeErrorStatus(&driver, r, "zeCommandListAppendLaunchKernel " + llvm::Twine(name));
   // MODULAR_L0_SYNC_LAUNCH=1: wait for each kernel, so a fault names the kernel that caused it.
   static const bool syncLaunch = getenv("MODULAR_L0_SYNC_LAUNCH") != nullptr;
-  if (syncLaunch)
+  if (syncLaunch || timeKernels)
     if (ze_result_t r = ze.zeCommandListHostSynchronize(queue.list, UINT64_MAX); r != ZE_RESULT_SUCCESS)
       return zeErrorStatus(&driver, r, "kernel " + llvm::Twine(name));
+  if (timeKernels)
+    kernelTimes().add(name, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
   return M_DRIVER_STATUS_SUCCESS;
 }
