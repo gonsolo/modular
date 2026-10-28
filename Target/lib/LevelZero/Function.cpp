@@ -136,7 +136,7 @@ M_driver_function::launch(M_driver_queue &queue,
   if (ze_result_t r = ze.zeCommandListAppendLaunchKernel(
           queue.list, kernel, &groups, nullptr, 0, nullptr);
       r != ZE_RESULT_SUCCESS)
-    return zeErrorStatus(&driver, r, "zeCommandListAppendLaunchKernel");
+    return zeErrorStatus(&driver, r, "zeCommandListAppendLaunchKernel " + llvm::Twine(name));
   // MODULAR_L0_SYNC_LAUNCH=1: wait for each kernel, so a fault names the kernel that caused it.
   static const bool syncLaunch = getenv("MODULAR_L0_SYNC_LAUNCH") != nullptr;
   if (syncLaunch)
