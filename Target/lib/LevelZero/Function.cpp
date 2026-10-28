@@ -135,6 +135,15 @@ M_driver_function::load(M_driver_context &ctx, M_driver_runtime_bundle_t bundle,
       r != ZE_RESULT_SUCCESS)
     return tl::unexpected(zeErrorStatus(&ctx.getDevice().getDriver(), r,
                                         "zeKernelCreate " + llvm::Twine(name)));
+  // Kernels reach buffers through pointers inside structs; without this NEO binds only buffers passed as arguments.
+  if (ze_result_t r = ctx.ze().zeKernelSetIndirectAccess(
+          kernel, ZE_KERNEL_INDIRECT_ACCESS_FLAG_DEVICE | ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST |
+                      ZE_KERNEL_INDIRECT_ACCESS_FLAG_SHARED);
+      r != ZE_RESULT_SUCCESS) {
+    ctx.ze().zeKernelDestroy(kernel);
+    return tl::unexpected(zeErrorStatus(&ctx.getDevice().getDriver(), r,
+                                        "zeKernelSetIndirectAccess " + llvm::Twine(name)));
+  }
   auto *func = new M_driver_function(ctx, kernel);
   func->name = name;
   return func;
