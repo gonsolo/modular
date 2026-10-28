@@ -85,7 +85,9 @@ M_driver_runtime_bundle::load(M_driver_context &ctx,
   desc.inputSize = bundle->mapped_data.size;
   desc.pInputModule =
       reinterpret_cast<const uint8_t *>(bundle->mapped_data.data);
-  desc.pBuildFlags = "";
+  // IGC picks 256 registers per kernel where 128 would spill: B580 VCM -29%, path tracing -6%.
+  static const char *buildFlags = getenv("MODULAR_L0_BUILD_FLAGS");
+  desc.pBuildFlags = buildFlags ? buildFlags : "-ze-intel-enable-auto-large-GRF-mode";
   ze_module_handle_t module = nullptr;
   ze_module_build_log_handle_t log = nullptr;
   ze_result_t r = ctx.ze().zeModuleCreate(ctx.zeContext, device.zeDevice, &desc,
