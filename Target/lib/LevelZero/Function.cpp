@@ -144,6 +144,11 @@ M_driver_function::load(M_driver_context &ctx, M_driver_runtime_bundle_t bundle,
     return tl::unexpected(zeErrorStatus(&ctx.getDevice().getDriver(), r,
                                         "zeKernelSetIndirectAccess " + llvm::Twine(name)));
   }
+  if (getenv("MODULAR_L0_KERNEL_INFO")) {
+    ze_kernel_properties_t props = zeDesc<ze_kernel_properties_t>(ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES);
+    if (ctx.ze().zeKernelGetProperties(kernel, &props) == ZE_RESULT_SUCCESS)
+      fprintf(stderr, "L0 kernel private %u spill %u  %s\n", props.privateMemSize, props.spillMemSize, name.substr(0, name.find('(')).c_str());
+  }
   auto *func = new M_driver_function(ctx, kernel);
   func->name = name;
   return func;

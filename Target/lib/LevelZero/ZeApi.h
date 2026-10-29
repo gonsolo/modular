@@ -65,7 +65,8 @@
   ZE_FN(zeKernelCreate)                                                        \
   ZE_FN(zeKernelDestroy)                                                       \
   ZE_FN(zeKernelSetGroupSize)                                                  \
-  ZE_FN(zeKernelSetIndirectAccess)                                             \
+  ZE_FN(zeKernelSetIndirectAccess)                                              \
+  ZE_FN(zeKernelGetProperties)                                             \
   ZE_FN(zeKernelSetArgumentValue)
 
 /// A zero-initialized Level Zero descriptor or properties struct of type `stype`.
