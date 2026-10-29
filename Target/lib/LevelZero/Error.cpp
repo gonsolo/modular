@@ -20,8 +20,9 @@ namespace M::Target::LevelZero {
 
 M_driver_status_t zeErrorStatus(M_driver_driver *driver, ze_result_t result,
                                 llvm::Twine const &context) {
-  return driver->status.create(context + ": ze_result_t 0x" +
-                               llvm::Twine::utohexstr(result));
+  // The code goes first: long kernel names in the context get truncated.
+  return driver->status.create("ze_result_t 0x" + llvm::Twine::utohexstr(result) +
+                               ": " + context);
 }
 
 } // namespace M::Target::LevelZero
