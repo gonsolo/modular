@@ -1,0 +1,242 @@
+diff --git a/llvm/lib/Target/SPIRV/SPIRV.h b/llvm/lib/Target/SPIRV/SPIRV.h
+index 80706bf47..b8dc61297 100644
+--- a/llvm/lib/Target/SPIRV/SPIRV.h
++++ b/llvm/lib/Target/SPIRV/SPIRV.h
+@@ -34,6 +34,18 @@ public:
+ 
+ ModulePass *createSPIRVPrepareFunctionsPass(const SPIRVTargetMachine &TM);
+ 
++class SPIRVRemoveAggregateTypesPass
++    : public RequiredPassInfoMixin<SPIRVRemoveAggregateTypesPass> {
++  const SPIRVTargetMachine &TM;
++
++public:
++  explicit SPIRVRemoveAggregateTypesPass(const SPIRVTargetMachine &TM)
++      : TM(TM) {}
++  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
++};
++
++ModulePass *createSPIRVRemoveAggregateTypesPass(const SPIRVTargetMachine &TM);
++
+ class SPIRVStructurizerPass
+     : public RequiredPassInfoMixin<SPIRVStructurizerPass> {
+ public:
+@@ -203,6 +215,7 @@ void initializeSPIRVLegalizePointerCastLegacyPass(PassRegistry &);
+ void initializeSPIRVRegularizerLegacyPass(PassRegistry &);
+ void initializeSPIRVMergeRegionExitTargetsLegacyPass(PassRegistry &);
+ void initializeSPIRVPrepareFunctionsLegacyPass(PassRegistry &);
++void initializeSPIRVRemoveAggregateTypesLegacyPass(PassRegistry &);
+ void initializeSPIRVPrepareGlobalsLegacyPass(PassRegistry &);
+ void initializeSPIRVLegalizeResourceBindingLegacyPass(PassRegistry &);
+ void initializeSPIRVLegalizeZeroSizeArraysLegacyPass(PassRegistry &);
+diff --git a/llvm/lib/Target/SPIRV/SPIRVPassRegistry.def b/llvm/lib/Target/SPIRV/SPIRVPassRegistry.def
+index de658699c..bce5d2a9d 100644
+--- a/llvm/lib/Target/SPIRV/SPIRVPassRegistry.def
++++ b/llvm/lib/Target/SPIRV/SPIRVPassRegistry.def
+@@ -33,6 +33,7 @@ MODULE_PASS("spirv-lower-ctor-dtor", SPIRVCtorDtorLoweringPass())
+ MODULE_PASS("spirv-prepare-functions", SPIRVPrepareFunctionsPass(*static_cast<const SPIRVTargetMachine *>(this)))
+ MODULE_PASS("spirv-prepare-globals", SPIRVPrepareGlobalsPass())
+ MODULE_PASS("spirv-pushconstant-access", SPIRVPushConstantAccessPass(*static_cast<const SPIRVTargetMachine *>(this)))
++MODULE_PASS("spirv-remove-aggregate-types", SPIRVRemoveAggregateTypesPass(*static_cast<const SPIRVTargetMachine *>(this)))
+ #undef MODULE_PASS
+ 
+ #ifndef FUNCTION_PASS
+diff --git a/llvm/lib/Target/SPIRV/SPIRVPrepareFunctions.cpp b/llvm/lib/Target/SPIRV/SPIRVPrepareFunctions.cpp
+index c3e3460c7..dfc612198 100644
+--- a/llvm/lib/Target/SPIRV/SPIRVPrepareFunctions.cpp
++++ b/llvm/lib/Target/SPIRV/SPIRVPrepareFunctions.cpp
+@@ -50,8 +50,6 @@ class SPIRVPrepareFunctionsImpl {
+   bool substituteIntrinsicCalls(Function *F);
+   bool substituteAbortKHRCalls(Function *F);
+   bool terminateBlocksAfterTrap(Module &M, Intrinsic::ID IID);
+-  Function *removeAggregateTypesFromSignature(Function *F);
+-  bool removeAggregateTypesFromCalls(Function *F);
+ 
+ public:
+   SPIRVPrepareFunctionsImpl(
+@@ -83,6 +81,36 @@ public:
+   StringRef getPassName() const override { return "SPIRV prepare functions"; }
+ };
+ 
++// Replaces aggregate types in signatures and indirect calls by i32 placeholders.
++// The IR is then not valid for generic passes (an aggregate PHI can take an i32
++// argument), so this runs right before SPIRVEmitIntrinsics, which handles them.
++class SPIRVRemoveAggregateTypesImpl {
++  const SPIRVTargetMachine &TM;
++  Function *removeAggregateTypesFromSignature(Function *F);
++  bool removeAggregateTypesFromCalls(Function *F);
++
++public:
++  SPIRVRemoveAggregateTypesImpl(const SPIRVTargetMachine &TM) : TM(TM) {}
++  bool runOnModule(Module &M);
++};
++
++class SPIRVRemoveAggregateTypesLegacy : public ModulePass {
++  const SPIRVTargetMachine &TM;
++
++public:
++  static char ID;
++  SPIRVRemoveAggregateTypesLegacy(const SPIRVTargetMachine &TM)
++      : ModulePass(ID), TM(TM) {}
++
++  bool runOnModule(Module &M) override {
++    return SPIRVRemoveAggregateTypesImpl(TM).runOnModule(M);
++  }
++
++  StringRef getPassName() const override {
++    return "SPIRV remove aggregate types";
++  }
++};
++
+ static cl::list<std::string> SPVAllowUnknownIntrinsics(
+     "spv-allow-unknown-intrinsics", cl::CommaSeparated,
+     cl::desc("Emit unknown intrinsics as calls to external functions. A "
+@@ -100,6 +128,11 @@ INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
+ INITIALIZE_PASS_END(SPIRVPrepareFunctionsLegacy, "spirv-prepare-functions",
+                     "SPIRV prepare functions", false, false)
+ 
++char SPIRVRemoveAggregateTypesLegacy::ID = 0;
++
++INITIALIZE_PASS(SPIRVRemoveAggregateTypesLegacy, "spirv-remove-aggregate-types",
++                "SPIRV remove aggregate types", false, false)
++
+ static std::string lowerLLVMIntrinsicName(IntrinsicInst *II) {
+   Function *IntrinsicFunc = II->getCalledFunction();
+   assert(IntrinsicFunc && "Missing function");
+@@ -660,7 +693,7 @@ addFunctionTypeMutation(NamedMDNode *NMD,
+ // function with the types replaced by i32 types. The change in types is
+ // noted in 'spv.cloned_funcs' metadata for later restoration.
+ Function *
+-SPIRVPrepareFunctionsImpl::removeAggregateTypesFromSignature(Function *F) {
++SPIRVRemoveAggregateTypesImpl::removeAggregateTypesFromSignature(Function *F) {
+   bool IsRetAggr = F->getReturnType()->isAggregateType();
+   // Allow intrinsics with aggregate return/argument types to reach GlobalISel.
+   // Renaming/mutating the signature of an intrinsic would desync its name from
+@@ -844,7 +877,7 @@ static std::string fixMultiOutputConstraintString(StringRef Constraints) {
+ // noted in 'spv.mutated_callsites' metadata for later restoration. For ASM we
+ // also have to mutate the constraint string as IRTranslator tries to handle
+ // multiple outputs and expects an aggregate return type in their presence.
+-bool SPIRVPrepareFunctionsImpl::removeAggregateTypesFromCalls(Function *F) {
++bool SPIRVRemoveAggregateTypesImpl::removeAggregateTypesFromCalls(Function *F) {
+   if (F->isDeclaration() || F->isIntrinsic())
+     return false;
+ 
+@@ -954,7 +987,6 @@ bool SPIRVPrepareFunctionsImpl::runOnModule(Module &M) {
+     }
+   }
+ 
+-  std::vector<Function *> FuncsWorklist;
+   for (Function &F : M) {
+     // MachineFunctionPass skips available_externally; strip + tag so AuxData
+     // can re-emit the original linkage as NonSemantic.AuxData::Linkage.
+@@ -966,6 +998,14 @@ bool SPIRVPrepareFunctionsImpl::runOnModule(Module &M) {
+     Changed |= substituteAbortKHRCalls(&F);
+     Changed |= substituteIntrinsicCalls(&F);
+     Changed |= sortBlocks(F);
++  }
++  return Changed;
++}
++
++bool SPIRVRemoveAggregateTypesImpl::runOnModule(Module &M) {
++  bool Changed = false;
++  std::vector<Function *> FuncsWorklist;
++  for (Function &F : M) {
+     Changed |= removeAggregateTypesFromCalls(&F);
+     FuncsWorklist.push_back(&F);
+   }
+@@ -997,3 +1037,15 @@ ModulePass *
+ llvm::createSPIRVPrepareFunctionsPass(const SPIRVTargetMachine &TM) {
+   return new SPIRVPrepareFunctionsLegacy(TM);
+ }
++
++PreservedAnalyses SPIRVRemoveAggregateTypesPass::run(Module &M,
++                                                     ModuleAnalysisManager &AM) {
++  return SPIRVRemoveAggregateTypesImpl(TM).runOnModule(M)
++             ? PreservedAnalyses::none()
++             : PreservedAnalyses::all();
++}
++
++ModulePass *
++llvm::createSPIRVRemoveAggregateTypesPass(const SPIRVTargetMachine &TM) {
++  return new SPIRVRemoveAggregateTypesLegacy(TM);
++}
+diff --git a/llvm/lib/Target/SPIRV/SPIRVTargetMachine.cpp b/llvm/lib/Target/SPIRV/SPIRVTargetMachine.cpp
+index 2b9d10582..9c330938a 100644
+--- a/llvm/lib/Target/SPIRV/SPIRVTargetMachine.cpp
++++ b/llvm/lib/Target/SPIRV/SPIRVTargetMachine.cpp
+@@ -62,6 +62,7 @@ extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeSPIRVTarget() {
+   initializeSPIRVMergeRegionExitTargetsLegacyPass(PR);
+   initializeSPIRVEmitIntrinsicsLegacyPass(PR);
+   initializeSPIRVPrepareFunctionsLegacyPass(PR);
++  initializeSPIRVRemoveAggregateTypesLegacyPass(PR);
+   initializeSPIRVPrepareGlobalsLegacyPass(PR);
+   initializeSPIRVLegalizeResourceBindingLegacyPass(PR);
+   initializeSPIRVCtorDtorLoweringLegacyPass(PR);
+@@ -231,6 +232,7 @@ void SPIRVPassConfig::addISelPrepare() {
+   addPass(createSPIRVLegalizeZeroSizeArraysPass(TM));
+   addPass(createSPIRVCBufferAccessLegacyPass());
+   addPass(createSPIRVPushConstantAccessLegacyPass(&TM));
++  addPass(createSPIRVRemoveAggregateTypesPass(TM));
+   addPass(createSPIRVEmitIntrinsicsPass(TM));
+   if (TM.getSubtargetImpl()->isLogicalSPIRV())
+     addPass(createSPIRVLegalizePointerCastPass(&TM));
+diff --git a/llvm/test/CodeGen/SPIRV/aggregate-arg-phi.ll b/llvm/test/CodeGen/SPIRV/aggregate-arg-phi.ll
+new file mode 100644
+--- /dev/null
++++ b/llvm/test/CodeGen/SPIRV/aggregate-arg-phi.ll
+@@ -0,0 +1,55 @@
++; An aggregate argument feeding a PHI or select directly: generic passes that add
++; a PHI edge must not see the i32 placeholder it becomes for SPIRVEmitIntrinsics.
++; RUN: llc -O2 -mtriple=spirv64-unknown-unknown %s -o - | FileCheck %s
++; RUN: %if spirv-tools %{ llc -O2 -mtriple=spirv64-unknown-unknown %s -o - -filetype=obj | spirv-val %}
++; RUN: llc -O2 -mtriple=spirv64-unknown-unknown --spirv-ext=+SPV_KHR_poison_freeze %s -o - | FileCheck %s --check-prefix=FREEZE
++
++%S = type { i32, float }
++
++; FREEZE-NOT: OpFreezeKHR
++
++; CHECK: %[[#A:]] = OpFunctionParameter
++; CHECK: %[[#B:]] = OpFunctionParameter
++; CHECK: OpPhi %[[#]] %[[#B]] %[[#]] %[[#A]] %[[#]]
++define %S @f(%S %a, %S %b, i32 %k) {
++entry:
++  switch i32 %k, label %other [ i32 0, label %p1
++                                i32 1, label %p2 ]
++p1:
++  br label %exit.pre
++p2:
++  br label %exit.pre
++exit.pre:
++  br label %exit
++other:
++  br label %exit
++exit:
++  %r = phi %S [ %a, %exit.pre ], [ %b, %other ]
++  ret %S %r
++}
++
++; CHECK: %[[#C:]] = OpFunctionParameter
++; CHECK: %[[#D:]] = OpFunctionParameter
++; CHECK: OpSelect %[[#]] %[[#]] %[[#C]] %[[#D]]
++define %S @g(%S %c, %S %d, i1 %k) {
++  %r = select i1 %k, %S %c, %S %d
++  ret %S %r
++}
++
++; A PHI on an aggregate argument in a loop header: LoopSimplify adds a preheader.
++; CHECK: OpFunctionParameter
++; CHECK: OpPhi
++define %S @h(%S %a, i32 %n, i1 %c) {
++entry:
++  br i1 %c, label %loop, label %skip
++skip:
++  br label %loop
++loop:
++  %r = phi %S [ %a, %entry ], [ %a, %skip ], [ %r, %loop ]
++  %i = phi i32 [ 0, %entry ], [ 1, %skip ], [ %i2, %loop ]
++  %i2 = add i32 %i, 1
++  %done = icmp eq i32 %i2, %n
++  br i1 %done, label %exit, label %loop
++exit:
++  ret %S %r
++}

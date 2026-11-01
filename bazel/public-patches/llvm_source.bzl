@@ -51,6 +51,11 @@ PATCHES = [
     # https://github.com/llvm/llvm-project/pull/236369
     # https://github.com/llvm/llvm-project/pull/236370
     "//bazel/public-patches:llvm-spirv-aggregate-value-ids.patch",
+    # SPIR-V: remove aggregate types from signatures right before
+    # SPIRVEmitIntrinsics, so that generic passes do not see i32 placeholders in
+    # aggregate PHIs and assert when adding an edge.
+    # https://github.com/llvm/llvm-project/pull/237724
+    "//bazel/public-patches:llvm-spirv-aggregate-arg-phi.patch",
 ]
 
 # Upstream lit test inputs that no target reads: about three quarters of the
