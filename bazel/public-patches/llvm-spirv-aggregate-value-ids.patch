@@ -1,5 +1,5 @@
 diff --git a/llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp b/llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp
-index e1f6fef36..e3374085b 100644
+index e1f6fef36..af4990c2e 100644
 --- a/llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp
 +++ b/llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp
 @@ -266,6 +266,7 @@ class SPIRVEmitIntrinsicsImpl
@@ -19,16 +19,17 @@ index e1f6fef36..e3374085b 100644
    auto *Phi = dyn_cast<PHINode>(I);
    for (Use &U : I->operands()) {
      Value *Op = U.get();
-@@ -1803,11 +1806,50 @@ void SPIRVEmitIntrinsicsImpl::insertCompositeAggregateArms(Instruction *I,
+@@ -1803,11 +1806,51 @@ void SPIRVEmitIntrinsicsImpl::insertCompositeAggregateArms(Instruction *I,
      for (unsigned Idx = 0, E = AggrTy->getNumElements(); Idx != E; ++Idx) {
        Value *Field = B.CreateExtractValue(Op, Idx);
        Composite = B.CreateInsertValue(Composite, Field, Idx);
 +      // The chain starts from poison, and this runs after
 +      // preprocessUndefsAndPoisons, which gives an aggregate poison a typed
-+      // placeholder. Left bare, visitInsertValueInst turns it into
-+      // UndefValue::get(i32), which is uniqued: a second such chain in the
-+      // function, or any i32 undef, then shares the first chain's SPIR-V type.
-+      // So lower it here as preprocessUndefsAndPoisons would have.
++      // placeholder. Left bare, visitInsertValueInst replaces it by one i32
++      // constant, and constants are uniqued: a second such chain in the
++      // function, or another use of that constant, then shares the first
++      // chain's SPIR-V type. So lower it here as preprocessUndefsAndPoisons
++      // would have.
 +      if (auto *First = dyn_cast<InsertValueInst>(Composite); First && !Idx) {
 +        B.SetInsertPoint(First);
 +        First->setOperand(0, lowerUndefOrPoison(First->getAggregateOperand(), B,
@@ -70,7 +71,7 @@ index e1f6fef36..e3374085b 100644
  void SPIRVEmitIntrinsicsImpl::preprocessCompositeConstants(IRBuilder<> &B) {
    const SPIRVSubtarget *STI = TM.getSubtargetImpl(*CurrF);
    bool HasPoisonExt =
-@@ -2550,15 +2592,21 @@ SPIRVEmitIntrinsicsImpl::visitExtractValueInst(ExtractValueInst &I) {
+@@ -2550,15 +2593,22 @@ SPIRVEmitIntrinsicsImpl::visitExtractValueInst(ExtractValueInst &I) {
      Args.push_back(B.getInt32(Op));
    Instruction *NewI = B.CreateIntrinsicWithoutFolding(Intrinsic::spv_extractv,
                                                        {I.getType()}, {Args});
@@ -80,6 +81,7 @@ index e1f6fef36..e3374085b 100644
 -  // intrinsic signature remains valid.
 -  if (NewI->getType()->isAggregateType() &&
 -      any_of(I.users(), [](User *U) { return isa<InsertValueInst>(U); })) {
+-    AggrConstTypes[NewI] = I.getType();
 +  // An aggregate extract is a SPIR-V value-id like an aggregate PHI, select or
 +  // freeze: keep the real aggregate type in metadata, but expose the value
 +  // itself as i32 so the intrinsic signature and its users stay valid. An
@@ -88,17 +90,19 @@ index e1f6fef36..e3374085b 100644
 +        auto *CB = dyn_cast<CallBase>(U);
 +        return CB && CB->isInlineAsm();
 +      })) {
-     AggrConstTypes[NewI] = I.getType();
++    Type *AggrTy = I.getType();
++    AggrConstTypes[NewI] = AggrTy;
      NewI->mutateType(B.getInt32Ty());
-     replaceMemInstrUses(&I, NewI, B);
+-    replaceMemInstrUses(&I, NewI, B);
++    replaceMemInstrUses(&I, NewI, B);   // erases I
 +    // The aggregate extractvalue only carried a name record; unlike a PHI, a
 +    // select or freeze does not pass its type down to an untyped operand.
 +    setInsertPointAfterDef(B, NewI);
-+    GR->buildAssignType(B, I.getType(), NewI, CanUseAnyVectorRank);
++    GR->buildAssignType(B, AggrTy, NewI, CanUseAnyVectorRank);
      return NewI;
    }
    replaceAllUsesWithAndErase(B, &I, NewI);
-@@ -3884,6 +3932,7 @@ bool SPIRVEmitIntrinsicsImpl::runOnFunction(Function &Func) {
+@@ -3884,6 +3934,7 @@ bool SPIRVEmitIntrinsicsImpl::runOnFunction(Function &Func) {
      processGlobalValue(GV, B);
  
    reconstructAggregateReturns(Func, B);
