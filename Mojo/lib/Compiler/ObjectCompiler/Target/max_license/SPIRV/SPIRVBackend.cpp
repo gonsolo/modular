@@ -110,16 +110,25 @@ public:
       if (!ec)
         module.print(os, nullptr);
     }
+    // Each module's IR as N.ll before codegen, its SPIR-V as N.spv after: a
+    // module that crashed llc is the .ll without a .spv.
+    static std::atomic<unsigned> counter{0};
+    auto dir = llvm::sys::Process::GetEnv("MOJO_SPIRV_DUMP_DIR");
+    std::string stem = dir ? *dir + "/" + std::to_string(counter++) : "";
+    if (dir) {
+      std::error_code ec;
+      llvm::raw_fd_ostream os(stem + ".ll", ec);
+      if (!ec)
+        module.print(os, nullptr);
+    }
     WriteableBufferRef codeBuf = WriteableBuffer::get();
     if (ErrorOrSuccess err =
             ctx.runLlc(module, *codeBuf, /*createObjectFile=*/true))
       return Error(Twine(err.getError()) +
                    ", llc failed to codegen LLVM IR to SPIR-V");
-    if (auto dir = llvm::sys::Process::GetEnv("MOJO_SPIRV_DUMP_DIR")) {
-      static std::atomic<unsigned> counter{0};
+    if (dir) {
       std::error_code ec;
-      llvm::raw_fd_ostream os(*dir + "/" + std::to_string(counter++) + ".spv",
-                              ec);
+      llvm::raw_fd_ostream os(stem + ".spv", ec);
       if (!ec)
         os.write(codeBuf->getBufferStart(), codeBuf->getBufferSize());
     }
