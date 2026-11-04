@@ -1,0 +1,26 @@
+--- a/llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp
++++ b/llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp
+@@ -1197,7 +1197,10 @@
+       return NewTy;
+     }
+   } else if (auto *ArrTy = dyn_cast<ArrayType>(OrigTy)) {
+-    if (Value *Op = U->getNumOperands() > 0 ? U->getOperand(0) : nullptr) {
++    // Only an operand that is an element tells the element type: an
++    // extractvalue's operand 0 is the aggregate it reads from.
++    Value *Op = U->getNumOperands() > 0 ? U->getOperand(0) : nullptr;
++    if (Op && Op->getType() == OrigTy->getContainedType(0)) {
+       Type *OpTy = ArrTy->getElementType();
+       Type *Ty = OpTy;
+       if (auto *PtrTy = dyn_cast<PointerType>(OpTy)) {
+@@ -1215,7 +1218,10 @@
+       }
+     }
+   } else if (auto *VecTy = dyn_cast<VectorType>(OrigTy)) {
+-    if (Value *Op = U->getNumOperands() > 0 ? U->getOperand(0) : nullptr) {
++    // Only an operand that is an element tells the element type: an
++    // extractvalue's operand 0 is the aggregate it reads from.
++    Value *Op = U->getNumOperands() > 0 ? U->getOperand(0) : nullptr;
++    if (Op && Op->getType() == OrigTy->getContainedType(0)) {
+       Type *OpTy = VecTy->getElementType();
+       Type *Ty = OpTy;
+       if (auto *PtrTy = dyn_cast<PointerType>(OpTy)) {

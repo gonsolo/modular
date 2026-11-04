@@ -56,6 +56,17 @@ PATCHES = [
     # aggregate PHIs and assert when adding an edge.
     # https://github.com/llvm/llvm-project/pull/237724
     "//bazel/public-patches:llvm-spirv-aggregate-arg-phi.patch",
+    # SPIR-V: a PHI of a vector of pointers, which the SLP vectorizer forms from
+    # vectorized address computations, is legal with masked gather/scatter.
+    "//bazel/public-patches:llvm-spirv-phi-pointer-vector.patch",
+    # SPIR-V: rewrite aggregate calls after cloning aggregate signatures; cloning
+    # a select or PHI that a rewritten call feeds asserts.
+    "//bazel/public-patches:llvm-spirv-aggregate-call-order.patch",
+    # SPIR-V: a vector's element type comes only from an operand that is an
+    # element, not from the aggregate an extractvalue reads.
+    "//bazel/public-patches:llvm-spirv-nested-vector-type.patch",
+    # SPIR-V: an undef aggregate PHI arm materializes in its incoming block.
+    "//bazel/public-patches:llvm-spirv-undef-aggregate-phi-arm.patch",
 ]
 
 # Upstream lit test inputs that no target reads: about three quarters of the
