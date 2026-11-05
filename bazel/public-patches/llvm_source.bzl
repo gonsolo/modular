@@ -67,6 +67,9 @@ PATCHES = [
     "//bazel/public-patches:llvm-spirv-nested-vector-type.patch",
     # SPIR-V: an undef aggregate PHI arm materializes in its incoming block.
     "//bazel/public-patches:llvm-spirv-undef-aggregate-phi-arm.patch",
+    # SPIR-V: a pointer vector element is extracted with the vector's component
+    # type and cast to the pointee type its user needs.
+    "//bazel/public-patches:llvm-spirv-pointer-vector-extract.patch",
 ]
 
 # Upstream lit test inputs that no target reads: about three quarters of the
