@@ -18,6 +18,7 @@
 #include "Target/max_license/SPIRV/SPIRVTraits.h"
 
 #include "KGENToLLVM/Target/max_license/GPUCommon.h"
+#include "Mojo/POPDialect/POPOps.h"
 
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/AttrTypeSubElements.h"
@@ -35,6 +36,22 @@ namespace {
 constexpr unsigned kFunctionAS = 0;
 constexpr unsigned kCrossWorkgroupAS = 1;
 constexpr unsigned kGenericAS = 4;
+
+/// Work-group and sub-group collectives: external calls nothing else marks convergent.
+static bool isConvergentBuiltin(StringRef name) {
+  if (name.consume_front("_Z")) {
+    unsigned len;
+    if (name.consumeInteger(10, len) || len > name.size())
+      return false;
+    name = name.take_front(len);
+  }
+  return name == "barrier" || name.starts_with("work_group_") ||
+         name.starts_with("sub_group_") ||
+         name.starts_with("intel_sub_group_") ||
+         name.starts_with("__spirv_ControlBarrier") ||
+         name.starts_with("__spirv_Group") ||
+         name.starts_with("__spirv_Subgroup");
+}
 
 /// Renumbers Mojo's (NVVM) address spaces to SPIR-V's and gives kernels the
 /// OpenCL ABI: pointer arguments in CrossWorkgroup (byval ones in Function)
@@ -93,6 +110,8 @@ struct SPIRVAddressSpacePass
 
     module.walk([&](LLVM::LLVMFuncOp func) {
       func->removeAttr("kgen.spirv.max_work_group_size");
+      if (func.isExternal() && isConvergentBuiltin(func.getSymName()))
+        func.setConvergent(true);
       if (func.getCConv() != LLVM::cconv::CConv::SPIR_KERNEL || func.isExternal())
         return;
       Block &entry = func.getBody().front();
@@ -130,6 +149,11 @@ public:
 
   mlir::LogicalResult verifyOp(mlir::Operation *op) const override {
     return verifyNoGPUHeapAllocation(op);
+  }
+
+  bool isConvergentOp(mlir::Operation *op) const override {
+    auto call = dyn_cast<POP::ExternalCallOp>(op);
+    return call && isConvergentBuiltin(call.getCallee().getValue());
   }
 
   void addPostLowerToLLVMPasses(mlir::OpPassManager &pm) const override {
