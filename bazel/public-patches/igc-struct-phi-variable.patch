@@ -1,0 +1,33 @@
+From 267610464f8a2de0b9bd1977ebd657280f2a8bdf Mon Sep 17 00:00:00 2001
+From: Andreas Wendleder <andreas.wendleder@proton.me>
+Date: Sun, 1 Nov 2026 03:51:45 +0100
+Subject: [PATCH 3/7] GetStructVariable: a struct phi takes its DeSSA root's
+ variable
+
+insertvalue and select looked up the root; a phi got a new variable. Moves into
+the phi write the root's, so a phi that is not its class's root read a register
+nothing had written.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0141xq22BhyCNa4pRpmwvhAc
+Signed-off-by: Andreas Wendleder <andreas.wendleder@proton.me>
+---
+ IGC/Compiler/CISACodeGen/CShader.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/IGC/Compiler/CISACodeGen/CShader.cpp b/IGC/Compiler/CISACodeGen/CShader.cpp
+index 628816623..8c2ecbe63 100644
+--- a/IGC/Compiler/CISACodeGen/CShader.cpp
++++ b/IGC/Compiler/CISACodeGen/CShader.cpp
+@@ -2028,7 +2028,7 @@ CVariable *CShader::GetStructVariable(llvm::Value *v) {
+         v = FirstInsertValueInst;
+       }
+     }
+-  } else if (isa<SelectInst>(v)) {
++  } else if (isa<SelectInst, PHINode>(v)) {
+     if (IGC_IS_FLAG_ENABLED(EnableDeSSA) && m_deSSA) {
+       e_alignment pAlign = EALIGN_GRF;
+       Value *rVal = m_deSSA->getRootValue(v, &pAlign);
+-- 
+2.56.0
+

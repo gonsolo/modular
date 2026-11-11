@@ -1,0 +1,100 @@
+From 79ce99d7c4e0ff9e5f45841d42b9e5a778721cc4 Mon Sep 17 00:00:00 2001
+From: Andreas Wendleder <andreas.wendleder@proton.me>
+Date: Thu, 5 Nov 2026 14:36:22 +0100
+Subject: [PATCH 6/7] vISA: splitOnSpill does not add preheader blocks during
+ RA
+
+regAlloc() creates the preheaders and then sizes per-block analyses such as
+points-to by the block count. splitOnSpill recomputed preheaders inside
+iteration 0 and could add blocks, so iteration 1 indexed the points-to table
+past its end (SIGSEGV in GlobalRA::markBlockLocalVars). It now only looks up
+existing preheaders; LoopVarSplit skips loops without one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0141xq22BhyCNa4pRpmwvhAc
+Signed-off-by: Andreas Wendleder <andreas.wendleder@proton.me>
+---
+ visa/GraphColor.cpp   | 5 ++++-
+ visa/LoopAnalysis.cpp | 9 ++++++---
+ visa/LoopAnalysis.h   | 5 +++--
+ 3 files changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/visa/GraphColor.cpp b/visa/GraphColor.cpp
+index 61439fd15..290828132 100644
+--- a/visa/GraphColor.cpp
++++ b/visa/GraphColor.cpp
+@@ -12247,7 +12247,10 @@ void GlobalRA::splitOnSpill(bool fastCompile, GraphColor &coloring,
+       kernel.getOption(vISA_DoSplitOnSpill)) {
+     RA_TRACE(std::cout << "\t--var split around loop\n");
+     LoopVarSplit loopSplit(kernel, &coloring, &liveAnalysis);
+-    kernel.fg.getLoops().computePreheaders();
++    // RA set up the CFG once; a block added now is missing from every
++    // per-block analysis, such as points-to. regAlloc() created the
++    // preheaders already.
++    kernel.fg.getLoops().computePreheaders(/*CreateMissing=*/false);
+     loopSplit.run();
+   }
+ }
+diff --git a/visa/LoopAnalysis.cpp b/visa/LoopAnalysis.cpp
+index 158843e2b..17b9a2234 100644
+--- a/visa/LoopAnalysis.cpp
++++ b/visa/LoopAnalysis.cpp
+@@ -470,7 +470,7 @@ std::vector<G4_BB *> &Loop::getLoopExits() {
+   return loopExits;
+ }
+ 
+-G4_BB *LoopDetection::getPreheader(Loop *loop) {
++G4_BB *LoopDetection::getPreheader(Loop *loop, bool CreateMissing) {
+   if (loop->preHeader)
+     return loop->preHeader;
+ 
+@@ -509,6 +509,9 @@ G4_BB *LoopDetection::getPreheader(Loop *loop) {
+     return enteringNode;
+   }
+ 
++  if (!CreateMissing)
++    return nullptr;
++
+   // a valid pre-header wasnt found, so create one and return it
+   // unless any pred uses SIMD CF to loop header
+   if (header->getLabel()) {
+@@ -601,11 +604,11 @@ Loop *LoopDetection::getOuterMostLoop(const G4_BB *bb) {
+   return L;
+ }
+ 
+-void LoopDetection::computePreheaders() {
++void LoopDetection::computePreheaders(bool CreateMissing) {
+   recomputeIfStale();
+ 
+   for (auto &loop : allLoops) {
+-    (void)getPreheader(&loop);
++    (void)getPreheader(&loop, CreateMissing);
+   }
+ }
+ 
+diff --git a/visa/LoopAnalysis.h b/visa/LoopAnalysis.h
+index 504962399..1bf29794b 100644
+--- a/visa/LoopAnalysis.h
++++ b/visa/LoopAnalysis.h
+@@ -204,7 +204,8 @@ public:
+   std::vector<Loop *> getTopLoops();
+   Loop *getInnerMostLoop(const G4_BB *);
+   Loop *getOuterMostLoop(const G4_BB *);
+-  void computePreheaders();
++  // With CreateMissing false, only loops that already have a preheader get one.
++  void computePreheaders(bool CreateMissing = true);
+ 
+   std::vector<Loop *>::iterator begin() { return topLoops.begin(); }
+   std::vector<Loop *>::iterator end() { return topLoops.end(); }
+@@ -236,7 +237,7 @@ private:
+   void populateLoop(BackEdge &);
+   void computeLoopTree();
+   void addLoop(Loop *newLoop, Loop *aParent);
+-  G4_BB *getPreheader(Loop *loop);
++  G4_BB *getPreheader(Loop *loop, bool CreateMissing = true);
+   void computeInnermostLoops();
+ };
+ } // namespace vISA
+-- 
+2.56.0
+

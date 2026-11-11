@@ -474,6 +474,12 @@ http_archive(
     url = "https://github.com/oneapi-src/level-zero/archive/refs/tags/v1.32.0.tar.gz",
 )
 
+# Intel's driver stack (IGC, gmmlib, compute runtime) from pinned sources with the fixes the Intel target needs;
+# opt-in, built only for `bazel build @intel_gpu_driver//:driver`. See INTEL.md.
+intel_gpu_driver = use_repo_rule("//bazel:intel_gpu_driver.bzl", "intel_gpu_driver")
+
+intel_gpu_driver(name = "intel_gpu_driver")
+
 # ......................... CUDA CUPTI (Tracy GPU profiling) ..................
 #
 # Tracy's TracyCUDA.hpp includes <cupti.h> for CUDA GPU profiling support.

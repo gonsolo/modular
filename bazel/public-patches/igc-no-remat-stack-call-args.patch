@@ -1,0 +1,39 @@
+From 67fb13e9c97688d599c453d29dc19dce6024618b Mon Sep 17 00:00:00 2001
+From: Andreas Wendleder <andreas.wendleder@proton.me>
+Date: Thu, 5 Nov 2026 13:52:48 +0100
+Subject: [PATCH 5/7] vISA: no remat from the stack-call argument and return
+ variables
+
+A call writes %arg and %retval without an explicit def. In a function that
+returns a value, its own writes to %retval looked like the unique def of a
+callee's result, so a copy of the first call's result was recomputed after a
+second call had overwritten %retval. Reproduced with -forcespills and
+stack calls: a value returned by one call and live across another was wrong.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0141xq22BhyCNa4pRpmwvhAc
+Signed-off-by: Andreas Wendleder <andreas.wendleder@proton.me>
+---
+ visa/Rematerialization.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/visa/Rematerialization.cpp b/visa/Rematerialization.cpp
+index 28d0b1993..b9c68a1b2 100644
+--- a/visa/Rematerialization.cpp
++++ b/visa/Rematerialization.cpp
+@@ -581,6 +581,12 @@ bool Rematerialization::canRematerialize(G4_SrcRegRegion *src, G4_BB *bb,
+       auto srcOpndRgn = srcOpnd->asSrcRegRegion();
+       auto srcOpndTopDcl = srcOpndRgn->getTopDcl();
+ 
++      // A call writes the stack-call argument and return variables without an
++      // explicit def, so a unique def found for them does not reach this use.
++      if (kernel.fg.builder->isPreDefArg(srcOpndTopDcl) ||
++          kernel.fg.builder->isPreDefRet(srcOpndTopDcl))
++        return false;
++
+       if (doNumRematCheck && getNumRemats(srcOpndTopDcl) == 0) {
+         return false;
+       }
+-- 
+2.56.0
+
