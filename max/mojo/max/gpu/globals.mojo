@@ -26,6 +26,7 @@ from std.sys.info import (
     current_accelerator,
     is_amd_gpu,
     is_apple_gpu,
+    is_intel_gpu,
     is_nvidia_gpu,
 )
 
@@ -96,6 +97,9 @@ def _resolve_max_threads_per_block_metadata() -> __mlir_type.`!kgen.string`:
     elif is_apple_gpu():
         # That attribute is used to represent Metal's [[max_total_threads_per_threadgroup(x)]]
         return "pop.air.max_work_group_size".value
+    elif is_intel_gpu():
+        # A hint only; the SPIR-V lowering drops it.
+        return "kgen.spirv.max_work_group_size".value
     else:
         CompilationTarget.unsupported_target_error[
             operation="MAX_THREADS_PER_BLOCK_METADATA",
