@@ -20,10 +20,37 @@
 
 #include "Mojo/ToolCommon/CompilationOptions.h"
 
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Process.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <atomic>
+#include <mutex>
 
 namespace M::KGEN {
 namespace {
+
+/// Enables the SPIR-V extensions Intel's driver supports; LLVM's SPIR-V backend
+/// only takes them from its `-spirv-ext` option.
+void enableIntelExtensions() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    auto &options = llvm::cl::getRegisteredOptions();
+    auto it = options.find("spirv-ext");
+    if (it == options.end())
+      return;
+    std::string extensions = "+SPV_EXT_shader_atomic_float_add,"
+                             "+SPV_EXT_shader_atomic_float_min_max,"
+                             "+SPV_INTEL_subgroups,"
+                             "+SPV_INTEL_masked_gather_scatter";
+    if (auto extra = llvm::sys::Process::GetEnv("MOJO_SPIRV_EXT"))
+      extensions += "," + *extra;
+    it->second->addOccurrence(0, "spirv-ext", extensions);
+  });
+}
 
 class SPIRVBackend final : public HostBackend {
 public:
@@ -48,8 +75,14 @@ public:
   void addSanitizers(llvm::ModulePassManager &,
                      const CompilationOptions &) const override {}
 
+  // Kernels run SIMD16, the warp size the MAX plugin reports.
   void attachCodegenAttributes(llvm::Function *kernelEntry) const override {
     kernelEntry->addFnAttr(llvm::Attribute::NoRecurse);
+    llvm::LLVMContext &ctx = kernelEntry->getContext();
+    kernelEntry->setMetadata(
+        "intel_reqd_sub_group_size",
+        llvm::MDNode::get(ctx, llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                   llvm::Type::getInt32Ty(ctx), 16))));
   }
 
   // The arch names the device for the driver; LLVM's SPIR-V backend has no
@@ -57,6 +90,7 @@ public:
   CompilationOptions
   adjustOptionsForTargetMachine(const CompilationOptions &options,
                                 llvm::StringRef moduleTriple) const override {
+    enableIntelExtensions();
     CompilationOptions adjusted = options;
     adjusted.targetCpu = "";
     return adjusted;
@@ -70,11 +104,34 @@ public:
 
   ErrorOr<BufferRef> emitObject(llvm::Module &module,
                                 EmitContext &ctx) const override {
+    if (auto path = llvm::sys::Process::GetEnv("MOJO_SPIRV_DUMP_IR")) {
+      std::error_code ec;
+      llvm::raw_fd_ostream os(*path, ec);
+      if (!ec)
+        module.print(os, nullptr);
+    }
+    // Each module's IR as N.ll before codegen, its SPIR-V as N.spv after: a
+    // module that crashed llc is the .ll without a .spv.
+    static std::atomic<unsigned> counter{0};
+    auto dir = llvm::sys::Process::GetEnv("MOJO_SPIRV_DUMP_DIR");
+    std::string stem = dir ? *dir + "/" + std::to_string(counter++) : "";
+    if (dir) {
+      std::error_code ec;
+      llvm::raw_fd_ostream os(stem + ".ll", ec);
+      if (!ec)
+        module.print(os, nullptr);
+    }
     WriteableBufferRef codeBuf = WriteableBuffer::get();
     if (ErrorOrSuccess err =
             ctx.runLlc(module, *codeBuf, /*createObjectFile=*/true))
       return Error(Twine(err.getError()) +
                    ", llc failed to codegen LLVM IR to SPIR-V");
+    if (dir) {
+      std::error_code ec;
+      llvm::raw_fd_ostream os(stem + ".spv", ec);
+      if (!ec)
+        os.write(codeBuf->getBufferStart(), codeBuf->getBufferSize());
+    }
     return BufferRef::take(codeBuf.release());
   }
 
