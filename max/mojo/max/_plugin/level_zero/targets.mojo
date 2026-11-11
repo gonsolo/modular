@@ -23,16 +23,16 @@ from std._gpu.host.info import (
     _KB,
     _supported_archs_line,
 )
-from std._plugin.spirv import SPIRVPlugin
+from std._plugin.level_zero import LevelZeroPlugin
 
-from . import SPIRVMaxPlugin
+from . import LevelZeroMaxPlugin
 
-comptime SPIRV_PLUGINS = TypeList.of[SPIRVPlugin, SPIRVMaxPlugin]().values
+comptime LEVEL_ZERO_PLUGINS = TypeList.of[LevelZeroPlugin, LevelZeroMaxPlugin]().values
 """The `opaque_plugin` payload of every Intel target."""
 
 
-struct SPIRVTargets(TargetAcceleratorCollection):
-    """Intel GPU targets that the SPIR-V plugins contribute."""
+struct LevelZeroTargets(TargetAcceleratorCollection):
+    """Intel GPU targets that the Level Zero plugins contribute."""
 
     comptime vendor_name: String = "Intel"
 
@@ -62,9 +62,9 @@ comptime IntelXe2Family = AcceleratorArchitectureFamily(
 comptime _intel_bmg_target = CompilationTarget[
     _mlir_value=__mlir_attr[
         `#kgen.target<triple = "spirv64-unknown-opencl", `,
-        `stdlib_plugin = "spirv", `,
+        `stdlib_plugin = "level_zero", `,
         `opaque_plugin = `,
-        SPIRV_PLUGINS,
+        LEVEL_ZERO_PLUGINS,
         `,`,
         `arch = "bmg", `,
         `features = "", `,

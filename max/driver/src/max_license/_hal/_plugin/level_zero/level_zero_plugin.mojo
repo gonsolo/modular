@@ -19,14 +19,14 @@ from ...execution_config.gpu_execution_config import GPUExecutionConfiguration
 from ...extensions.traits import DefaultHALExtensions
 
 
-struct SPIRVHalPlugin(HalPlugin):
+struct LevelZeroHalPlugin(HalPlugin):
     """HAL plugin for SPIR-V (Intel GPU) targets, run by the Level Zero
     driver plugin."""
 
-    comptime name: __mlir_type.`!kgen.string` = _get_kgen_string["spirv"]()
-    comptime HookFor[target: CompilationTarget] = SPIRVHalPluginHooks[target]
+    comptime name: __mlir_type.`!kgen.string` = _get_kgen_string["level_zero"]()
+    comptime HookFor[target: CompilationTarget] = LevelZeroHalPluginHooks[target]
 
 
-struct SPIRVHalPluginHooks[target: CompilationTarget](HalPluginHooks):
+struct LevelZeroHalPluginHooks[target: CompilationTarget](HalPluginHooks):
     comptime ExecutionConfigType[device: DeviceRef] = GPUExecutionConfiguration
     comptime extensions = DefaultHALExtensions

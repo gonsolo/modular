@@ -64,14 +64,14 @@ def _spirv_gpu_id[name: StaticString, dim: StaticString]() -> Int:
         return _ocl_size["_Z14get_num_groupsj", dim]()
 
 
-struct SPIRVPlugin(StdPlugin):
+struct LevelZeroPlugin(StdPlugin):
     """`PluginHooks` implementation for SPIR-V (Intel GPU) backends."""
 
-    comptime name: __mlir_type.`!kgen.string` = _get_kgen_string["spirv"]()
-    comptime HookFor[target: CompilationTarget] = SPIRVPluginHooks[target]
+    comptime name: __mlir_type.`!kgen.string` = _get_kgen_string["level_zero"]()
+    comptime HookFor[target: CompilationTarget] = LevelZeroPluginHooks[target]
 
 
-struct SPIRVPluginHooks[target: CompilationTarget](PluginHooks):
+struct LevelZeroPluginHooks[target: CompilationTarget](PluginHooks):
     comptime device_kind = TargetDeviceKind.gpu
 
     comptime gpu_id_fn[name: StaticString, dim: StaticString]: OptionalReg[

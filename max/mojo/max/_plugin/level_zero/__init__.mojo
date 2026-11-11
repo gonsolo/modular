@@ -43,14 +43,14 @@ def _shuffle_word(mask: UInt, word: UInt32, offset: UInt32) -> UInt32:
     return external_call["_Z17sub_group_shufflejj", UInt32](word, offset)
 
 
-struct SPIRVMaxPlugin(MaxPlugin):
+struct LevelZeroMaxPlugin(MaxPlugin):
     """Provides MAX behavior for SPIR-V (Intel GPU) targets."""
 
-    comptime name: __mlir_type.`!kgen.string` = _get_kgen_string["spirv"]()
-    comptime HookFor[target: CompilationTarget] = SPIRVMaxPluginHooks[target]
+    comptime name: __mlir_type.`!kgen.string` = _get_kgen_string["level_zero"]()
+    comptime HookFor[target: CompilationTarget] = LevelZeroMaxPluginHooks[target]
 
 
-struct SPIRVMaxPluginHooks[target: CompilationTarget](MaxPluginHooks):
+struct LevelZeroMaxPluginHooks[target: CompilationTarget](MaxPluginHooks):
     # The SPIR-V backend requests SIMD16 for every kernel.
     comptime warp_size = 16
     comptime barrier_fn: OptionalReg[_BarrierPluginHookFnType] = _barrier
