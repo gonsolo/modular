@@ -1,0 +1,20 @@
+--- a/IGC/CMakeLists.txt
++++ b/IGC/CMakeLists.txt
+@@ -642,7 +642,7 @@
+       ALIAS RttiDisabled               "-fno-rtti"
+       ALIAS RttiEnabled                "-frtti"
+       ALIAS TreatWarnAsErrorDisabled   TreatWarnAsError REMOVE_GROUP
+-      ALIAS TreatWarnAsErrorEnabled    "-Werror"
++      ALIAS TreatWarnAsErrorEnabled    TreatWarnAsError REMOVE_GROUP
+       ALIAS UnreferencedVariable
+       ALIAS UninitializedVarWarning
+       ALIAS WholeProgramOptimization
+@@ -710,7 +710,7 @@
+       ALIAS RttiDisabled               "-fno-rtti"
+       ALIAS RttiEnabled                Rtti REMOVE_GROUP
+       ALIAS TreatWarnAsErrorDisabled   TreatWarnAsError REMOVE_GROUP
+-      ALIAS TreatWarnAsErrorEnabled    "-Werror"
++      ALIAS TreatWarnAsErrorEnabled    TreatWarnAsError REMOVE_GROUP
+       ALIAS UnreferencedVariable
+       ALIAS UninitializedVarWarning
+       ALIAS WholeProgramOptimization

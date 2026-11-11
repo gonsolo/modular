@@ -1,0 +1,32 @@
+From 5e861d2c694f92609a0d65407e47bc804ae6811d Mon Sep 17 00:00:00 2001
+From: Andreas Wendleder <andreas.wendleder@proton.me>
+Date: Wed, 4 Nov 2026 21:37:33 +0100
+Subject: [PATCH 4/7] Allow SPV_INTEL_masked_gather_scatter in SPIR-V input
+
+The translator reads it, but ValidateSPIRVExtensionSupport rejected any
+module that uses it. LLVM's SPIR-V backend needs it for the vectors of
+pointers the SLP vectorizer forms.
+---
+ .../ocl_igc_interface/extensions/SPIRVExtensions.td         | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/IGC/AdaptorOCL/ocl_igc_interface/extensions/SPIRVExtensions.td b/IGC/AdaptorOCL/ocl_igc_interface/extensions/SPIRVExtensions.td
+index f4bd1c4c1..bfa25c0db 100644
+--- a/IGC/AdaptorOCL/ocl_igc_interface/extensions/SPIRVExtensions.td
++++ b/IGC/AdaptorOCL/ocl_igc_interface/extensions/SPIRVExtensions.td
+@@ -211,6 +211,12 @@ def SPV_INTEL_long_composites : Extension<
+   "https://github.khronos.org/SPIRV-Registry/extensions/INTEL/SPV_INTEL_long_composites.html"
+ >;
+ 
++def SPV_INTEL_masked_gather_scatter : Extension<
++  "SPV_INTEL_masked_gather_scatter",
++  [ Capability<"MaskedGatherScatterINTEL"> ],
++  "https://github.khronos.org/SPIRV-Registry/extensions/INTEL/SPV_INTEL_masked_gather_scatter.html"
++>;
++
+ def SPV_INTEL_split_barrier : Extension<
+   "SPV_INTEL_split_barrier",
+   [ Capability<"SplitBarrierINTEL"> ],
+-- 
+2.56.0
+

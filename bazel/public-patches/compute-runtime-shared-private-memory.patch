@@ -1,0 +1,258 @@
+diff --git a/level_zero/core/source/cmdlist/cmdlist_hw.inl b/level_zero/core/source/cmdlist/cmdlist_hw.inl
+index 776eabfae1310..e7c39547c193c 100644
+--- a/level_zero/core/source/cmdlist/cmdlist_hw.inl
++++ b/level_zero/core/source/cmdlist/cmdlist_hw.inl
+@@ -5525,11 +5525,15 @@ void CommandListCoreFamily<gfxCoreFamily>::allocateOrReuseKernelPrivateMemory(Ke
+ 
+     bool allocToReuseFound = false;
+ 
++    // Forced per-dispatch mode shares the smallest allocation at least this large; the kernel addresses it with its own per-thread size.
++    const bool reuseLarger = NEO::debugManager.flags.ForcePrivateMemoryPerDispatch.get() == 1;
++    uint32_t reusedSize = 0;
+     for (auto &alloc : privateAllocsToReuse) {
+-        if (sizePerHwThread == alloc.first) {
++        const bool fits = reuseLarger ? sizePerHwThread <= alloc.first : sizePerHwThread == alloc.first;
++        if (fits && (!allocToReuseFound || alloc.first < reusedSize)) {
+             privateAlloc = alloc.second;
++            reusedSize = alloc.first;
+             allocToReuseFound = true;
+-            break;
+         }
+     }
+     if (!allocToReuseFound) {
+diff --git a/level_zero/core/source/cmdlist/cmdlist_hw_immediate.inl b/level_zero/core/source/cmdlist/cmdlist_hw_immediate.inl
+index 476e07db1701a..3a0670d5f0139 100644
+--- a/level_zero/core/source/cmdlist/cmdlist_hw_immediate.inl
++++ b/level_zero/core/source/cmdlist/cmdlist_hw_immediate.inl
+@@ -2442,7 +2442,26 @@ void CommandListCoreFamilyImmediate<gfxCoreFamily>::allocateOrReuseKernelPrivate
+     L0::KernelImp *kernelImp = static_cast<KernelImp *>(kernel);
+     if (sizePerHwThread != 0U && kernelImp->getParentModule().shouldAllocatePrivateMemoryPerDispatch()) {
+         auto ownership = getCsr(false)->obtainUniqueOwnership();
+-        this->allocateOrReuseKernelPrivateMemory(kernel, sizePerHwThread, getCsr(false)->getOwnedPrivateAllocations());
++        auto &owned = getCsr(false)->getOwnedPrivateAllocations();
++        this->allocateOrReuseKernelPrivateMemory(kernel, sizePerHwThread, owned);
++        if (NEO::debugManager.flags.ForcePrivateMemoryPerDispatch.get() == 1 && owned.size() > 1) {
++            // One pool: keep the largest; the smaller ones go once the GPU has finished with them.
++            auto largest = owned[0];
++            for (auto &alloc : owned) {
++                if (alloc.first > largest.first) {
++                    largest = alloc;
++                }
++            }
++            auto csr = getCsr(false);
++            for (auto &alloc : owned) {
++                if (alloc.second != largest.second) {
++                    csr->getInternalAllocationStorage()->storeAllocationWithTaskCount(std::unique_ptr<NEO::GraphicsAllocation>(alloc.second),
++                                                                                      NEO::AllocationUsage::TEMPORARY_ALLOCATION, csr->peekTaskCount());
++                }
++            }
++            owned.clear();
++            owned.push_back(largest);
++        }
+     }
+ }
+ 
+diff --git a/level_zero/core/source/module/module_imp.cpp b/level_zero/core/source/module/module_imp.cpp
+index ba6a1218ffd56..d1ef6f655f87d 100644
+--- a/level_zero/core/source/module/module_imp.cpp
++++ b/level_zero/core/source/module/module_imp.cpp
+@@ -1600,6 +1600,9 @@ void ModuleImp::checkIfPrivateMemoryPerDispatchIsNeeded() {
+         auto globalMemorySize = neoDevice->getRootDevice()->getGlobalMemorySize(static_cast<uint32_t>(deviceBitfield.to_ulong()));
+         auto numSubDevices = deviceBitfield.count();
+         this->allocatePrivateMemoryPerDispatch = modulePrivateMemorySize * numSubDevices > globalMemorySize;
++        if (NEO::debugManager.flags.ForcePrivateMemoryPerDispatch.get() != -1) {
++            this->allocatePrivateMemoryPerDispatch = NEO::debugManager.flags.ForcePrivateMemoryPerDispatch.get() == 1;
++        }
+         PRINT_STRING(NEO::debugManager.flags.PrintDebugMessages.get(), stderr, "Private Memory Per Dispatch %d for modulePrivateMemorySize %zu subDevices %zu globalMemorySize %" PRIu64 "\n",
+                      this->allocatePrivateMemoryPerDispatch, modulePrivateMemorySize, numSubDevices, globalMemorySize);
+     }
+diff --git a/level_zero/core/test/unit_tests/sources/cmdlist/test_cmdlist_8.cpp b/level_zero/core/test/unit_tests/sources/cmdlist/test_cmdlist_8.cpp
+index 19183f6407c93..62d0dd09a83a5 100644
+--- a/level_zero/core/test/unit_tests/sources/cmdlist/test_cmdlist_8.cpp
++++ b/level_zero/core/test/unit_tests/sources/cmdlist/test_cmdlist_8.cpp
+@@ -2908,6 +2908,108 @@ HWTEST_F(CommandListCreate, givenImmediateCmdListWhenPrivateAllocationIsReusedAf
+     csrOwnedPrivateAllocs.clear();
+ }
+ 
++HWTEST_F(CommandListCreate, givenForcePrivateMemoryPerDispatchWhenLargerAllocationsAreStoredThenSmallestSufficientOneIsReused) {
++    DebugManagerStateRestore restorer;
++    debugManager.flags.ForcePrivateMemoryPerDispatch.set(1);
++
++    auto commandList = std::make_unique<MockCommandListCoreFamily<FamilyType::gfxCoreFamily>>();
++    commandList->allocateOrReuseKernelPrivateMemoryCallBase = true;
++    commandList->device = this->device;
++    uint32_t sizePerHwThread = 0x800;
++    Mock<Module> mockModule(this->device, nullptr);
++    Mock<KernelImp> mockKernel;
++    const_cast<uint32_t &>(mockKernel.sharedState->kernelImmData->getDescriptor().kernelAttributes.perHwThreadPrivateMemorySize) = sizePerHwThread;
++    mockKernel.module = &mockModule;
++
++    auto mockMem = std::make_unique<uint8_t[]>(0x1000);
++    MockGraphicsAllocation largeGA(mockMem.get(), 0x1000);
++    MockGraphicsAllocation smallGA(mockMem.get(), 0x1000);
++    MockGraphicsAllocation sufficientGA(mockMem.get(), 0x1000);
++    PrivateAllocsToReuseContainer mapForReuse;
++    mapForReuse.push_back({0x2000, &largeGA});
++    mapForReuse.push_back({0x400, &smallGA});
++    mapForReuse.push_back({0x1000, &sufficientGA});
++
++    commandList->allocateOrReuseKernelPrivateMemory(&mockKernel, sizePerHwThread, mapForReuse);
++
++    EXPECT_EQ(3u, mapForReuse.size());
++    const auto &residencyContainer = commandList->commandContainer.getResidencyContainer();
++    EXPECT_EQ(1u, getResidencyOccurrences(residencyContainer, &sufficientGA));
++    EXPECT_EQ(0u, getResidencyOccurrences(residencyContainer, &largeGA));
++    EXPECT_EQ(0u, getResidencyOccurrences(residencyContainer, &smallGA));
++}
++
++HWTEST_F(CommandListCreate, givenImmediateCmdListAndForcePrivateMemoryPerDispatchWhenLargerKernelIsDispatchedThenOnlyLargestPrivateAllocationIsKept) {
++    DebugManagerStateRestore restorer;
++    debugManager.flags.ForcePrivateMemoryPerDispatch.set(1);
++
++    MockCommandStreamReceiver mockCommandStreamReceiver(*neoDevice->executionEnvironment, neoDevice->getRootDeviceIndex(), neoDevice->getDeviceBitfield());
++    mockCommandStreamReceiver.setupContext(*neoDevice->getDefaultEngine().osContext);
++    ze_command_queue_desc_t queueDesc = {};
++    auto queue = std::make_unique<Mock<CommandQueue>>(device, &mockCommandStreamReceiver, &queueDesc);
++
++    auto commandList = std::make_unique<MockCommandListImmediateHw<FamilyType::gfxCoreFamily>>();
++    commandList->cmdQImmediate = queue.get();
++    commandList->allocateOrReuseKernelPrivateMemoryIfNeededCallBase = true;
++    commandList->allocateOrReuseKernelPrivateMemoryCallBase = true;
++
++    Mock<Module> mockModule(this->device, nullptr);
++    mockModule.allocatePrivateMemoryPerDispatch = true;
++    Mock<KernelImp> smallKernel;
++    Mock<KernelImp> largeKernel;
++    const_cast<uint32_t &>(smallKernel.sharedState->kernelImmData->getDescriptor().kernelAttributes.perHwThreadPrivateMemorySize) = 0x1000;
++    const_cast<uint32_t &>(largeKernel.sharedState->kernelImmData->getDescriptor().kernelAttributes.perHwThreadPrivateMemorySize) = 0x2000;
++    smallKernel.module = &mockModule;
++    largeKernel.module = &mockModule;
++
++    auto &csrOwnedPrivateAllocs = mockCommandStreamReceiver.getOwnedPrivateAllocations();
++    commandList->allocateOrReuseKernelPrivateMemoryIfNeeded(&smallKernel, 0x1000);
++    ASSERT_EQ(1u, csrOwnedPrivateAllocs.size());
++    auto smallAlloc = csrOwnedPrivateAllocs[0].second;
++
++    commandList->allocateOrReuseKernelPrivateMemoryIfNeeded(&largeKernel, 0x2000);
++    ASSERT_EQ(1u, csrOwnedPrivateAllocs.size());
++    EXPECT_EQ(0x2000u, csrOwnedPrivateAllocs[0].first);
++    auto largeAlloc = csrOwnedPrivateAllocs[0].second;
++    EXPECT_NE(smallAlloc, largeAlloc);
++    EXPECT_TRUE(neoDevice->getMemoryManager()->getTemporaryAllocationsList().peekContains(*smallAlloc));
++
++    commandList->allocateOrReuseKernelPrivateMemoryIfNeeded(&smallKernel, 0x1000);
++    ASSERT_EQ(1u, csrOwnedPrivateAllocs.size());
++    EXPECT_EQ(largeAlloc, csrOwnedPrivateAllocs[0].second);
++    EXPECT_EQ(1u, getResidencyOccurrences(commandList->getCmdContainer().getResidencyContainer(), largeAlloc));
++}
++
++HWTEST_F(CommandListCreate, givenImmediateCmdListAndDefaultPrivateMemoryPerDispatchWhenKernelsOfDifferentSizesAreDispatchedThenEachSizeKeepsItsAllocation) {
++    MockCommandStreamReceiver mockCommandStreamReceiver(*neoDevice->executionEnvironment, neoDevice->getRootDeviceIndex(), neoDevice->getDeviceBitfield());
++    ze_command_queue_desc_t queueDesc = {};
++    auto queue = std::make_unique<Mock<CommandQueue>>(device, &mockCommandStreamReceiver, &queueDesc);
++
++    auto commandList = std::make_unique<MockCommandListImmediateHw<FamilyType::gfxCoreFamily>>();
++    commandList->cmdQImmediate = queue.get();
++    commandList->allocateOrReuseKernelPrivateMemoryIfNeededCallBase = true;
++    commandList->allocateOrReuseKernelPrivateMemoryCallBase = true;
++
++    Mock<Module> mockModule(this->device, nullptr);
++    mockModule.allocatePrivateMemoryPerDispatch = true;
++    Mock<KernelImp> smallKernel;
++    Mock<KernelImp> largeKernel;
++    const_cast<uint32_t &>(smallKernel.sharedState->kernelImmData->getDescriptor().kernelAttributes.perHwThreadPrivateMemorySize) = 0x1000;
++    const_cast<uint32_t &>(largeKernel.sharedState->kernelImmData->getDescriptor().kernelAttributes.perHwThreadPrivateMemorySize) = 0x2000;
++    smallKernel.module = &mockModule;
++    largeKernel.module = &mockModule;
++
++    auto &csrOwnedPrivateAllocs = mockCommandStreamReceiver.getOwnedPrivateAllocations();
++    commandList->allocateOrReuseKernelPrivateMemoryIfNeeded(&largeKernel, 0x2000);
++    commandList->allocateOrReuseKernelPrivateMemoryIfNeeded(&smallKernel, 0x1000);
++    ASSERT_EQ(2u, csrOwnedPrivateAllocs.size());
++    auto smallAlloc = csrOwnedPrivateAllocs[1].second;
++
++    commandList->allocateOrReuseKernelPrivateMemoryIfNeeded(&smallKernel, 0x1000);
++    EXPECT_EQ(2u, csrOwnedPrivateAllocs.size());
++    EXPECT_EQ(smallAlloc, csrOwnedPrivateAllocs[1].second);
++}
++
+ HWTEST_F(CommandListCreate, givenCounterDeviceAllocWhenGetDeviceCounterAllocForResidencyThenReturnCorrectAllocation) {
+     auto commandList = std::make_unique<MockCommandListCoreFamily<FamilyType::gfxCoreFamily>>();
+     commandList->initialize(device, NEO::EngineGroupType::renderCompute, 0u);
+diff --git a/level_zero/core/test/unit_tests/sources/cmdlist/test_cmdlist_append_launch_kernel_2.cpp b/level_zero/core/test/unit_tests/sources/cmdlist/test_cmdlist_append_launch_kernel_2.cpp
+index b731e7c64d659..b5a9eee7b2dec 100644
+--- a/level_zero/core/test/unit_tests/sources/cmdlist/test_cmdlist_append_launch_kernel_2.cpp
++++ b/level_zero/core/test/unit_tests/sources/cmdlist/test_cmdlist_append_launch_kernel_2.cpp
+@@ -1700,6 +1700,60 @@ HWTEST_F(CommandListAppendLaunchKernel, givenTwoKernelPrivateAllocsWhichDontExce
+         EXPECT_EQ(pCommandList->getOwnedPrivateAllocationsSize(), 0u);
+     }
+ }
++
++HWTEST_F(CommandListAppendLaunchKernel, givenForcePrivateMemoryPerDispatchWhenModulePrivateMemoryFitsDeviceThenKernelsShareOnePerDispatchAllocation) {
++    DebugManagerStateRestore restorer;
++    debugManager.flags.ForcePrivateMemoryPerDispatch.set(1);
++
++    auto devInfo = device->getNEODevice()->getDeviceInfo();
++    auto kernelsNb = 2u;
++    uint32_t margin128KB = 131072u;
++    auto underAllocSize = static_cast<uint32_t>(devInfo.globalMemSize / kernelsNb / devInfo.computeUnitsUsedForScratch) - margin128KB;
++    auto kernelNames = std::array<std::string, 2u>{"test1", "test2"};
++
++    auto &kernelImmData = this->module->kernelImmData;
++    for (size_t i = 0; i < kernelsNb; i++) {
++        auto &kernelDesc = const_cast<KernelDescriptor &>(kernelImmData[i]->getDescriptor());
++        kernelDesc.kernelAttributes.perHwThreadPrivateMemorySize = underAllocSize - static_cast<uint32_t>(i * MemoryConstants::cacheLineSize);
++        kernelDesc.kernelAttributes.flags.usesPrintf = false;
++        kernelDesc.kernelMetadata.kernelName = kernelNames[i];
++    }
++
++    this->module->checkIfPrivateMemoryPerDispatchIsNeeded();
++    EXPECT_TRUE(this->module->shouldAllocatePrivateMemoryPerDispatch());
++
++    auto pCommandList = std::make_unique<WhiteBox<::L0::CommandListCoreFamily<FamilyType::gfxCoreFamily>>>();
++    pCommandList->device = this->module->getDevice();
++    auto memoryMgr = static_cast<OsAgnosticMemoryManager *>(pCommandList->device->getNEODevice()->getExecutionEnvironment()->memoryManager.get());
++    memoryMgr->turnOnFakingBigAllocations();
++
++    auto kernels = std::vector<std::unique_ptr<WhiteBox<::L0::KernelImp>>>();
++    for (size_t i = 0; i < kernelsNb; i++) {
++        kernels.push_back(this->createKernelWithName(kernelNames[i]));
++        pCommandList->allocateOrReuseKernelPrivateMemoryIfNeeded(kernels[i].get(),
++                                                                 kernels[i]->getKernelDescriptor().kernelAttributes.perHwThreadPrivateMemorySize);
++        EXPECT_EQ(pCommandList->getOwnedPrivateAllocationsSize(), 1u);
++    }
++}
++
++HWTEST_F(CommandListAppendLaunchKernel, givenForcePrivateMemoryPerDispatchDisabledWhenModulePrivateMemoryExceedsDeviceThenPrivateMemoryIsNotAllocatedPerDispatch) {
++    DebugManagerStateRestore restorer;
++    debugManager.flags.ForcePrivateMemoryPerDispatch.set(0);
++
++    auto devInfo = device->getNEODevice()->getDeviceInfo();
++    auto kernelsNb = 2u;
++    auto overAllocMinSize = static_cast<uint32_t>(devInfo.globalMemSize / kernelsNb / devInfo.computeUnitsUsedForScratch + MemoryConstants::kiloByte);
++
++    auto &kernelImmData = this->module->kernelImmData;
++    for (size_t i = 0; i < kernelsNb; i++) {
++        auto &kernelDesc = const_cast<KernelDescriptor &>(kernelImmData[i]->getDescriptor());
++        kernelDesc.kernelAttributes.perHwThreadPrivateMemorySize = overAllocMinSize;
++    }
++
++    this->module->checkIfPrivateMemoryPerDispatchIsNeeded();
++    EXPECT_FALSE(this->module->shouldAllocatePrivateMemoryPerDispatch());
++}
++
+ HWTEST2_F(CommandListAppendLaunchKernel, GivenDebugToggleSetWhenUpdateStreamPropertiesIsCalledThenCorrectThreadArbitrationPolicyIsSet, IsHeapfulRequired) {
+     DebugManagerStateRestore restorer;
+     debugManager.flags.ForceThreadArbitrationPolicyProgrammingWithScm.set(1);
+diff --git a/shared/source/debug_settings/debug_variables_base.inl b/shared/source/debug_settings/debug_variables_base.inl
+index eb0ad473f9573..9bb4e2feaf24d 100644
+--- a/shared/source/debug_settings/debug_variables_base.inl
++++ b/shared/source/debug_settings/debug_variables_base.inl
+@@ -709,6 +709,7 @@ DECLARE_DEBUG_VARIABLE(int32_t, ExposeSingleDevice, -1, "-1: default, 0: disable
+ DECLARE_DEBUG_VARIABLE(int32_t, ExperimentalSetWalkerPartitionCount, 0, "Experimental implementation: Set number of COMPUTE_WALKERs for a given Partition Type, 0 - do not set the feature.")
+ DECLARE_DEBUG_VARIABLE(int32_t, ExperimentalSetWalkerPartitionType, -1, "Experimental implementation: Set COMPUTE_WALKER Partition Type. Valid values for types from 1 to 3")
+ DECLARE_DEBUG_VARIABLE(int32_t, ExperimentalEnableCustomLocalMemoryAlignment, 0, "Align local memory allocations to a given value. Works only with allocations at least as big as the value.  0: no effect, 2097152: 2 megabytes, 1073741824: 1 gigabyte")
++DECLARE_DEBUG_VARIABLE(int32_t, ForcePrivateMemoryPerDispatch, -1, "-1: default (only when a module's private memory exceeds the device), 0: never, 1: always, so kernels share their private allocations")
+ DECLARE_DEBUG_VARIABLE(int32_t, ExperimentalEnableDeviceAllocationCache, -1, "Experimentally enable device usm allocation cache. Use X% of device memory.")
+ DECLARE_DEBUG_VARIABLE(int32_t, ExperimentalEnableImageAllocationCache, -1, "Reuse graphics allocations of destroyed Level Zero images for new images with identical layout. -1: default (enabled when device USM allocation reuse is supported and a reuse cleaner is available), 0: disabled, 1: enabled")
+ DECLARE_DEBUG_VARIABLE(int32_t, ExperimentalEnableHostAllocationCache, -1, "Experimentally enable host usm allocation cache. Use X% of shared system memory.")
