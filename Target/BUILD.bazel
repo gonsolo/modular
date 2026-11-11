@@ -144,6 +144,49 @@ modular_cc_binary(
     ],
 )
 
+modular_cc_binary(
+    # avoids the `lib` prefix; plugins are not traditional libs
+    name = "LevelZeroPlugin.so",
+    srcs = glob(
+        [
+            "lib/LevelZero/*.cpp",
+            "lib/LevelZero/*.h",
+        ],
+        allow_empty = False,
+    ),
+    linkopts = ["-ldl"],
+    linkshared = True,
+    linkstatic = False,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":Support",
+        "//SDK:HAL",
+        "@dlpack",
+        "@level_zero_include//:ze_headers",
+        "@llvm-project//llvm:Support",
+        "@tl_expected",
+    ],
+)
+
+modular_cc_test(
+    name = "LevelZeroPluginTest",
+    size = "small",
+    srcs = ["test/Fixture.h"],
+    data = [":LevelZeroPlugin.so"],
+    env = {
+        "MODULAR_DRIVER_PLUGINS": "$(location :LevelZeroPlugin.so)",
+    },
+    tags = [
+        "gpu",
+        "manual",
+    ],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":DriverPluginTests",
+        "@tl_expected",
+    ],
+)
+
 modular_cc_test(
     name = "HIPPluginTest",
     size = "small",
