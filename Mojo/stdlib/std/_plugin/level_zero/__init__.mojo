@@ -10,4 +10,4 @@
 # limitations under the License.
 # ===----------------------------------------------------------------------=== #
 
-from .spirv_plugin import SPIRVPlugin, SPIRVPluginHooks
+from .level_zero_plugin import LevelZeroPlugin, LevelZeroPluginHooks
