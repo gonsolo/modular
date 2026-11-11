@@ -1,0 +1,14 @@
+diff --git a/llvm/lib/Target/SPIRV/SPIRVLegalizerInfo.cpp b/llvm/lib/Target/SPIRV/SPIRVLegalizerInfo.cpp
+index 99cf86548..b74730fcb 100644
+--- a/llvm/lib/Target/SPIRV/SPIRVLegalizerInfo.cpp
++++ b/llvm/lib/Target/SPIRV/SPIRVLegalizerInfo.cpp
+@@ -440,6 +440,9 @@ SPIRVLegalizerInfo::SPIRVLegalizerInfo(const SPIRVSubtarget &ST) {
+                            0, ElementCount::getFixed(MaxVectorSize)))
+       .legalFor(allPtrsScalarsAndVectors)
+       .legalIf(ExtendedPtrsScalarsAndVectors)
++      .legalIf([](const LegalityQuery &Query) {
++        return Query.Types[0].isPointerVector();
++      })
+       .moreElementsToNextPow2(0);
+ 
+   getActionDefinitionsBuilder(G_BITCAST).legalIf(
