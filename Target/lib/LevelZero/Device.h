@@ -29,6 +29,7 @@ public:
   ze_device_handle_t zeDevice;
   ze_device_properties_t props = zeDesc<ze_device_properties_t>(ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES);
   ze_device_compute_properties_t computeProps = zeDesc<ze_device_compute_properties_t>(ZE_STRUCTURE_TYPE_DEVICE_COMPUTE_PROPERTIES);
+  ze_device_ip_version_ext_t ipVersion = zeDesc<ze_device_ip_version_ext_t>(ZE_STRUCTURE_TYPE_DEVICE_IP_VERSION_EXT);
   /// Ordinal of the command queue group that runs compute work.
   uint32_t computeOrdinal = 0;
 

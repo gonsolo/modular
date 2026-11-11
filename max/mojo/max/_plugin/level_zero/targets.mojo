@@ -38,7 +38,7 @@ struct LevelZeroTargets(TargetAcceleratorCollection):
 
     comptime RAW_TARGETS = TypeList.of[
         Trait=TargetAcceleratorType,
-        IntelBMG._with_cli_values[["bmg"]],
+        IntelXe2._with_cli_values[["xe2"]],
     ]().values
 
     @staticmethod
@@ -59,32 +59,32 @@ comptime IntelXe2Family = AcceleratorArchitectureFamily(
 )
 """Intel Xe2 GPU architecture family."""
 
-comptime _intel_bmg_target = CompilationTarget[
+comptime _intel_xe2_target = CompilationTarget[
     _mlir_value=__mlir_attr[
         `#kgen.target<triple = "spirv64-unknown-opencl", `,
         `stdlib_plugin = "level_zero", `,
         `opaque_plugin = `,
         LEVEL_ZERO_PLUGINS,
         `,`,
-        `arch = "bmg", `,
+        `arch = "xe2", `,
         `features = "", `,
         `data_layout = "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-n8:16:32:64-G1", `,
         `simd_bit_width = 128`,
         `> : !kgen.target`,
     ]
 ]()
-"""Target configuration for Intel Battlemage (Xe2) GPUs."""
+"""Target configuration for Intel Xe2 GPUs."""
 
-comptime IntelBMG = TargetAccelerator[
+comptime IntelXe2 = TargetAccelerator[
     GPUInfo.from_family(
         family=IntelXe2Family,
         name="Arc B580",
         api="level_zero",
-        arch_name="bmg",
+        arch_name="xe2",
         compute=2.0,  # Xe2
         version="xe2",
         sm_count=20,  # Xe2 cores
     ),
-    _intel_bmg_target,
+    _intel_xe2_target,
 ]()
-"""Intel Arc B580 (Battlemage G21) configuration."""
+"""Intel Xe2 configuration, sized for the Arc B580 (Xe2-HPG)."""
