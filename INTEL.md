@@ -6,7 +6,7 @@ LLVM's SPIR-V backend and run through a Level Zero plugin for the MAX driver
 
 ## What works
 
-- `--target-accelerator intel:bmg`: kernels become SPIR-V 1.4 for OpenCL
+- `--target-accelerator intel:xe2`: kernels become SPIR-V 1.4 for OpenCL
   environments (`spirv64-unknown-opencl`), with sub-groups of 16 (the Mojo warp
   size on this target), shared memory, barriers, atomics, shuffles and ballots.
 - `DeviceContext()` picks the B580 through the Level Zero plugin: buffers,
@@ -22,26 +22,42 @@ Not tested: the MAX graph compiler and the kernels library, other Intel GPUs.
 ## Commits
 
 1. A SPIR-V GPU target for Intel GPUs (compiler).
-2. stdlib: the SPIR-V plugin and `is_intel_gpu`.
-3. max: the SPIR-V plugin and the `intel:bmg` target.
+2. stdlib: the Level Zero plugin and `is_intel_gpu`.
+3. max: the Level Zero plugin and the `intel:xe2` target.
 4. LLVM: SPIR-V backend fixes carried until they land upstream.
 5. SPIR-V backend: Intel extensions, SIMD16, sub-group shuffle and ballot.
 6. The Level Zero HAL plugin (`Target/lib/LevelZero`).
 7. Optional debugging switches: `MODULAR_L0_SYNC_LAUNCH=1` (wait after every
    launch and copy), `MODULAR_L0_KERNEL_TIMES=1` (time per kernel),
    `MODULAR_L0_KERNEL_INFO=1` (private and spill memory per kernel).
+8. The plugins are named after Level Zero, and the target after the Xe version
+   (`intel:xe2`), which the device reports from its graphics IP version.
+9. `@intel_gpu_driver`: IGC and the compute runtime from pinned, patched sources.
 
 ## Requirements
 
-- Linux with the Level Zero loader and Intel's compute runtime
-  ([compute-runtime](https://github.com/intel/compute-runtime)) installed.
-- For anything beyond small kernels, Intel's graphics compiler (IGC) with these
-  fixes, until they are merged (build IGC and put its libraries first on
-  `LD_LIBRARY_PATH`):
-  - [intel-graphics-compiler#463](https://github.com/intel/intel-graphics-compiler/pull/463):
-    a returned struct value is lost.
-  - [intel-graphics-compiler#465](https://github.com/intel/intel-graphics-compiler/pull/465):
-    a struct PHI reads an unwritten register.
+- Linux with the Level Zero loader.
+- Intel's graphics compiler (IGC) and compute runtime with the fixes the target
+  still needs. `@intel_gpu_driver` (opt-in, `bazel/intel_gpu_driver.bzl`) fetches
+  them at pinned revisions, applies the patches in `bazel/public-patches/` and
+  builds them (about an hour the first time; needs cmake, ninja, a C++ compiler,
+  python3, bison and flex):
+
+  ```sh
+  ./bazelw --output_base=$HOME/bazel_hal build @intel_gpu_driver//:driver
+  source $HOME/bazel_hal/external/+intel_gpu_driver+intel_gpu_driver/env.sh
+  ```
+
+  IGC is pinned to the master commit the fixes are tested on, because release
+  v2.42.6 crashes compiling large kernels; it moves to the next release. The
+  fixes: IGC [#460](https://github.com/intel/intel-graphics-compiler/pull/460),
+  [#463](https://github.com/intel/intel-graphics-compiler/pull/463),
+  [#465](https://github.com/intel/intel-graphics-compiler/pull/465),
+  [#467](https://github.com/intel/intel-graphics-compiler/pull/467),
+  [#468](https://github.com/intel/intel-graphics-compiler/pull/468) and two more
+  in `bazel/public-patches/igc-*.patch`, and compute runtime
+  [#1037](https://github.com/intel/compute-runtime/pull/1037). Small kernels also
+  run on the stock driver.
 
 The LLVM fixes are carried as patches in `bazel/public-patches/llvm-spirv-*.patch`:
 [llvm#227599](https://github.com/llvm/llvm-project/pull/227599) (merged after the
@@ -87,7 +103,7 @@ cp -L $B/Target/CPUPlugin.so $B/Target/LevelZeroPlugin.so $R/lib/plugins/
 export MODULAR_MAX_PACKAGE_ROOT=$R MODULAR_MOJO_MAX_PACKAGE_ROOT=$R \
        MODULAR_MOJO_MAX_DRIVER_PATH=$R/bin/mojo MODULAR_MOJO_MAX_IMPORT_PATH=$R/lib/mojo
 export MODULAR_DRIVER_PLUGINS="level_zero@$R/lib/plugins/LevelZeroPlugin.so;cpu@$R/lib/plugins/CPUPlugin.so"
-$R/bin/mojo run --target-accelerator intel:bmg vadd.mojo
+$R/bin/mojo run --target-accelerator intel:xe2 vadd.mojo
 ```
 
 `vadd.mojo`:
