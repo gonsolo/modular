@@ -32,8 +32,10 @@ DriverResult<M_driver_device_t> M_driver_device::create(M_driver_driver &drv,
   ZeApi &ze = drv.ze();
   auto *device = new M_driver_device(drv, static_cast<int>(deviceId),
                                      drv.devices[deviceId]);
-  if (ze_result_t r = ze.zeDeviceGetProperties(device->zeDevice, &device->props);
-      r != ZE_RESULT_SUCCESS) {
+  device->props.pNext = &device->ipVersion;
+  ze_result_t r = ze.zeDeviceGetProperties(device->zeDevice, &device->props);
+  device->props.pNext = nullptr;
+  if (r != ZE_RESULT_SUCCESS) {
     delete device;
     return tl::unexpected(zeErrorStatus(&drv, r, "zeDeviceGetProperties"));
   }
@@ -52,18 +54,14 @@ DriverResult<M_driver_device_t> M_driver_device::create(M_driver_driver &drv,
   return device;
 }
 
-/// The compile target arch, as `--target-accelerator intel:<arch>` names it.
-static const char *archName(uint32_t pciDeviceId) {
-  switch (pciDeviceId) {
-  case 0xE202: // Battlemage G21
-  case 0xE20B: // Arc B580
-  case 0xE20C: // Arc B570
-  case 0xE20D:
-  case 0xE210:
-  case 0xE212:
-  case 0xE215:
-  case 0xE216:
-    return "bmg";
+/// The compile target arch, as `--target-accelerator intel:<arch>` names it: the
+/// Xe version from the graphics IP version (architecture in bits 31..22).
+static const char *archName(uint32_t ipVersion) {
+  switch (ipVersion >> 22) {
+  case 20:
+    return "xe2";
+  case 30:
+    return "xe3";
   default:
     return "unknown";
   }
@@ -82,7 +80,7 @@ M_driver_status_t M_driver_device::property(llvm::StringRef name, void *value) {
   if (name == M_DRIVER_DEVICE_PROPERTY_NAME)
     return copyString(props.name);
   if (name == M_DRIVER_DEVICE_PROPERTY_ARCH)
-    return copyString(archName(props.deviceId));
+    return copyString(archName(ipVersion.ipVersion));
   if (name == M_DRIVER_DEVICE_PROPERTY_HOST_UNIFIED) {
     *static_cast<int64_t *>(value) =
         (props.flags & ZE_DEVICE_PROPERTY_FLAG_INTEGRATED) ? 1 : 0;

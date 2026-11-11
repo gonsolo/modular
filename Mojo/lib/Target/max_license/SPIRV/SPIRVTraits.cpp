@@ -38,8 +38,8 @@ unsigned mojoToSPIRVAddressSpace(unsigned addressSpace) {
 }
 
 static constexpr TargetTraits::AcceleratorArch kSPIRVAcceleratorArchs[] = {
-    {"bmg", "Xe2 (Arc B580/B570)"},
-    {"intel:<arch>", "(alias) e.g., intel:bmg"},
+    {"xe2", "Xe2 (e.g. Arc B580/B570)"},
+    {"intel:<arch>", "(alias) e.g., intel:xe2"},
 };
 
 llvm::ArrayRef<TargetTraits::AcceleratorArch>

@@ -819,7 +819,7 @@ struct CompilationTarget[_mlir_value: _TargetType = _current_target(), //](
         optionally if the target is also the specified sub-architecture.
 
         Parameters:
-            subarch: The subarchitecture (e.g. bmg) (defaults to any).
+            subarch: The subarchitecture (e.g. xe2) (defaults to any).
 
         Returns:
             True if the triple target is SPIR-V and False otherwise.
