@@ -70,13 +70,6 @@ PATCHES = [
     # SPIR-V: a pointer vector element is extracted with the vector's component
     # type and cast to the pointee type its user needs.
     "//bazel/public-patches:llvm-spirv-pointer-vector-extract.patch",
-    # SPIR-V: type the format string of an unmangled `printf` call as `ptr to
-    # i8`, as OpenCL.std printf requires. Without this the format keeps the
-    # pointee type of the string global (e.g. [N x i8]), and IGC trips its
-    # "Calling a function with a bad signature!" reader assertion on the second
-    # format string. Needed for in-kernel GPU printf.
-    # https://github.com/llvm/llvm-project/pull/229720
-    "//bazel/public-patches:llvm-spirv-printf-format-i8.patch",
 ]
 
 # Upstream lit test inputs that no target reads: about three quarters of the
