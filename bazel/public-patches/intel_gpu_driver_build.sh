@@ -12,6 +12,9 @@ mkdir -p "$P"
 : > "$LOG"
 step() { echo "intel_gpu_driver: $*" | tee -a "$LOG"; }
 common=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$P" -DCMAKE_INSTALL_LIBDIR=lib)
+# Modular's bazelrc sets CC=false and CXX=false so repository rules cannot reach host tools; this build needs them.
+[ "${CC:-}" = false ] && unset CC
+[ "${CXX:-}" = false ] && unset CXX
 
 step "IGC (with LLVM, clang, lld, SPIR-V translator and tools from source)"
 # -Bsymbolic and no semantic interposition keep IGC's own LLVM from binding to another LLVM in the process.

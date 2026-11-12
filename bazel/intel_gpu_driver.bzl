@@ -63,7 +63,8 @@ def _intel_gpu_driver_impl(rctx):
     install = str(rctx.path("install"))
     result = rctx.execute(["bash", str(script), str(rctx.path("src")), install], timeout = 6 * 3600, quiet = False)
     if result.return_code:
-        fail("intel_gpu_driver: build failed, see {}/build.log".format(install))
+        log = rctx.read(install + "/build.log").splitlines()
+        fail("intel_gpu_driver: build failed, the end of its log:\n" + "\n".join(log[-40:]))
     rctx.delete("src")
     rctx.file("env.sh", "\n".join([
         "# Source this to run Mojo programs on the driver built here.",
