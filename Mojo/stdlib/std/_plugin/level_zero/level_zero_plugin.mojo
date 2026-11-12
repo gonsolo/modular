@@ -50,7 +50,7 @@ def _printf_emit[
     `sys/_libc.mojo` uses, where the loaded pack (not a pointer to it) makes
     the variadic args the values themselves rather than references.
     """
-    _ = external_call["printf", Int32, num_fixed_args=1](
+    _ = external_call["__spirv_ocl_printf", Int32, num_fixed_args=1](
         get_static_string[fmt]().as_c_string_span(),
         args.get_loaded_kgen_pack(),
     )
