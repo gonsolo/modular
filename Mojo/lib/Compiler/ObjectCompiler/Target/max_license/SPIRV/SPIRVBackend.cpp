@@ -45,7 +45,8 @@ void enableIntelExtensions() {
     std::string extensions = "+SPV_EXT_shader_atomic_float_add,"
                              "+SPV_EXT_shader_atomic_float_min_max,"
                              "+SPV_INTEL_subgroups,"
-                             "+SPV_INTEL_masked_gather_scatter";
+                             "+SPV_INTEL_masked_gather_scatter,"
+                             "+SPV_EXT_relaxed_printf_string_address_space";
     if (auto extra = llvm::sys::Process::GetEnv("MOJO_SPIRV_EXT"))
       extensions += "," + *extra;
     it->second->addOccurrence(0, "spirv-ext", extensions);
