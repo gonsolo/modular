@@ -54,8 +54,9 @@ Not tested: the MAX graph compiler and the kernels library, other Intel GPUs.
   [#463](https://github.com/intel/intel-graphics-compiler/pull/463),
   [#465](https://github.com/intel/intel-graphics-compiler/pull/465),
   [#467](https://github.com/intel/intel-graphics-compiler/pull/467),
-  [#468](https://github.com/intel/intel-graphics-compiler/pull/468) and two more
-  in `bazel/public-patches/igc-*.patch`, and compute runtime
+  [#468](https://github.com/intel/intel-graphics-compiler/pull/468),
+  [#477](https://github.com/intel/intel-graphics-compiler/pull/477) and
+  [#478](https://github.com/intel/intel-graphics-compiler/pull/478), and compute runtime
   [#1037](https://github.com/intel/compute-runtime/pull/1037). Small kernels also
   run on the stock driver.
 

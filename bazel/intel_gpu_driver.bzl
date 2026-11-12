@@ -28,10 +28,10 @@ _PATCHES = [
     ("igc", "igc-augmentation-binary-search.patch"),  # intel/intel-graphics-compiler#460
     ("igc", "igc-struct-return-value.patch"),  # intel/intel-graphics-compiler#463
     ("igc", "igc-struct-phi-variable.patch"),  # intel/intel-graphics-compiler#465
-    ("igc", "igc-masked-gather-scatter-input.patch"),  # SPV_INTEL_masked_gather_scatter in SPIR-V input
+    ("igc", "igc-masked-gather-scatter-input.patch"),  # intel/intel-graphics-compiler#477
     ("igc", "igc-no-remat-stack-call-args.patch"),  # intel/intel-graphics-compiler#467
     ("igc", "igc-split-on-spill-preheader.patch"),  # intel/intel-graphics-compiler#468
-    ("igc", "igc-defined-members-nonconstant-base.patch"),  # a non-constant base struct defines every member
+    ("igc", "igc-defined-members-nonconstant-base.patch"),  # intel/intel-graphics-compiler#478
     ("igc", "igc-no-werror.patch"),  # newer host compilers warn where IGC's -Werror expects silence
     ("compute-runtime", "compute-runtime-shared-private-memory.patch"),  # intel/compute-runtime#1037
 ]
