@@ -22,7 +22,6 @@ from std.collections import OptionalReg
 from std.collections.string.string_span import _get_kgen_string, get_static_string
 from std.ffi import CStringSpan, external_call
 from std.io.file_descriptor import RawFileDescriptor
-from std.io.io import _printf
 from std.sys.info import CompilationTarget
 
 
@@ -30,9 +29,26 @@ def _print_emit[O: Origin](cstr: CStringSpan[O], file: RawFileDescriptor):
     """Writes `print()` output from an Intel Level Zero kernel through the
     OpenCL `printf` builtin.
 
+    Intel's `printf` takes `%s` only for string literals, so the text goes out
+    as `%c` arguments, 32 per call; NUL padding ends the last call's output.
     Device `printf` has a single output stream, so `file` is ignored.
     """
-    _printf["%s"](cstr.ptr())
+    var bytes = cstr.as_bytes()
+    for i in range(0, len(bytes), 32):
+
+        @always_inline
+        def c(k: Int) {imm} -> Int32:
+            return Int32(bytes[i + k]) if i + k < len(bytes) else 0
+
+        _printf_emit[
+            "%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c"
+        ](
+            c(0), c(1), c(2), c(3), c(4), c(5), c(6), c(7),
+            c(8), c(9), c(10), c(11), c(12), c(13), c(14), c(15),
+            c(16), c(17), c(18), c(19), c(20), c(21), c(22), c(23),
+            c(24), c(25), c(26), c(27), c(28), c(29), c(30), c(31),
+            file=file,
+        )
 
 
 @inline(.always)
