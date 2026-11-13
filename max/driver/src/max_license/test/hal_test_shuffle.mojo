@@ -573,8 +573,13 @@ def _lane_group_reduce_launch_helper[
 
 
 def test_lane_group_reduce_fp32(ctx: DeviceContext) raises:
-    _lane_group_reduce_launch_helper[.float32, 1, 4, 8](ctx)
-    _lane_group_reduce_launch_helper[.float32, 1, 4, 8, broadcast=True](ctx)
+    # The (num_lanes=4, stride=8) strided group spans (4-1)*8 = 24 lanes, which
+    # fits a 32-lane warp but NOT the B60's 16-lane warp. On a warp where the
+    # span overflows, `lane_group_reduce` now (correctly) fails its
+    # warp-bounds assert, so only launch it when the span fits.
+    comptime if (4 - 1) * 8 < ctx.default_device_info.warp_size:
+        _lane_group_reduce_launch_helper[.float32, 1, 4, 8](ctx)
+        _lane_group_reduce_launch_helper[.float32, 1, 4, 8, broadcast=True](ctx)
 
     # CDNA4+ permlane path
     comptime if ctx.target.is_amd_gpu():
@@ -587,19 +592,25 @@ def test_lane_group_reduce_fp32(ctx: DeviceContext) raises:
 
 
 def test_lane_group_reduce_bf16(ctx: DeviceContext) raises:
-    _lane_group_reduce_launch_helper[.bfloat16, 1, 4, 8](ctx)
+    # (num_lanes=4, stride=8) spans 24 lanes — only fits a >=32-lane warp; see
+    # test_lane_group_reduce_fp32 for the warp-bounds rationale.
+    comptime if (4 - 1) * 8 < ctx.default_device_info.warp_size:
+        _lane_group_reduce_launch_helper[.bfloat16, 1, 4, 8](ctx)
 
 
 def test_lane_group_reduce_bf16_packed(ctx: DeviceContext) raises:
-    _lane_group_reduce_launch_helper[.bfloat16, 2, 4, 8](ctx)
+    comptime if (4 - 1) * 8 < ctx.default_device_info.warp_size:
+        _lane_group_reduce_launch_helper[.bfloat16, 2, 4, 8](ctx)
 
 
 def test_lane_group_reduce_fp16(ctx: DeviceContext) raises:
-    _lane_group_reduce_launch_helper[.float16, 1, 4, 8](ctx)
+    comptime if (4 - 1) * 8 < ctx.default_device_info.warp_size:
+        _lane_group_reduce_launch_helper[.float16, 1, 4, 8](ctx)
 
 
 def test_lane_group_reduce_fp16_packed(ctx: DeviceContext) raises:
-    _lane_group_reduce_launch_helper[.float16, 2, 4, 8](ctx)
+    comptime if (4 - 1) * 8 < ctx.default_device_info.warp_size:
+        _lane_group_reduce_launch_helper[.float16, 2, 4, 8](ctx)
 
 
 def _lane_group_min_broadcast_helper[
@@ -658,8 +669,10 @@ def test_lane_group_min(ctx: DeviceContext) raises:
     comptime if ctx.target.is_amd_gpu():
         _lane_group_min_broadcast_helper[.float64, 1, 4](ctx)
         _lane_group_min_broadcast_helper[.float64, 1, warp_size](ctx)
-    # Stride > 1 (exercises shuffle_xor fallback path)
-    _lane_group_min_broadcast_helper[.float32, 1, 4, stride=8](ctx)
+    # Stride > 1 (exercises shuffle_xor fallback path). (num_lanes=4, stride=8)
+    # spans 24 lanes — only fits a >=32-lane warp; guarded for the B60's 16.
+    comptime if (4 - 1) * 8 < warp_size:
+        _lane_group_min_broadcast_helper[.float32, 1, 4, stride=8](ctx)
 
     # CDNA4+ permlane path
     comptime if ctx.target.is_amd_gpu():
@@ -713,10 +726,12 @@ def main() raises:
         test_lane_group_sum_stride1_half(ctx)
         test_lane_group_max(ctx)
         test_lane_group_min(ctx)
-        # TODO(b60): lane_group_reduce (stride-based) mismatches on the B60
-        # (expected 48, got 16 for num_lanes=4/stride=8). See the issue filed
-        # with a minimal reproducer. Re-enable once the stride semantics are
-        # reconciled on the Intel/SPIR-V target.
-        # test_lane_group_reduce_fp32(ctx)
-        # test_lane_group_reduce_fp16(ctx)
-        # test_lane_group_reduce_fp16_packed(ctx)
+        # Strided lane_group_reduce. The (num_lanes=4, stride=8) group spans 24
+        # lanes, which overflows the B60's 16-lane warp, so those specific
+        # launches are warp-guarded in the test_lane_group_reduce_* functions
+        # (and `lane_group_reduce` now asserts the strided group fits the warp
+        # rather than silently returning wrong values). On a >=32-lane warp the
+        # strided launches run.
+        test_lane_group_reduce_fp32(ctx)
+        test_lane_group_reduce_fp16(ctx)
+        test_lane_group_reduce_fp16_packed(ctx)
