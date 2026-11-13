@@ -1,0 +1,38 @@
+load(":hal_test.bzl", "hal_gpu_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# HAL device-execution tests for the Intel Level Zero plugin (Arc Pro B60).
+#
+# Each target runs a small kernel through the HAL `DeviceContext` and checks the
+# result on the host, so a green run proves device execution dispatches through
+# the `M_driver_*` HAL plugin named by `MODULAR_DRIVER_PLUGINS` (the
+# `level_zero` plugin). Ported from the B60 HAL validation suite.
+#
+# `hal_test_dim` and `hal_test_targetinfo` are pure host-side (no kernel / no
+# GPU); the rest launch a kernel on the device.
+#
+# `ZE_AFFINITY_MASK=1` pins a single B60 (see the suite notes); drop it (or set
+# it to the relevant card) to run on a different device.
+
+hal_gpu_test("hal_test_add_constant")
+hal_gpu_test("hal_test_barrier")
+# `hal_test_cast_roundtrip` is excluded: it exercises a `BFloat16 -> Float32`
+# cast, which the Intel/SPIR-V target rejects with
+#   "OpTypeFloat type with bfloat requires the following SPIR-V extension:
+#    SPV_KHR_bfloat16"
+# (the target does not enable SPV_KHR_bfloat16). Re-enable once BFloat16 is
+# supported on the target.
+# hal_gpu_test("hal_test_cast_roundtrip")
+# `hal_test_convert` is excluded for the same reason: its only conversion is
+# `.float32 -> .bfloat16`, which also requires SPV_KHR_bfloat16.
+# hal_gpu_test("hal_test_convert")
+hal_gpu_test("hal_test_dim")
+hal_gpu_test("hal_test_id")
+hal_gpu_test("hal_test_laneid")
+hal_gpu_test("hal_test_prefix_sum")
+hal_gpu_test("hal_test_shuffle")
+hal_gpu_test("hal_test_simd_insert")
+hal_gpu_test("hal_test_simd_reduction")
+hal_gpu_test("hal_test_sum")
+hal_gpu_test("hal_test_targetinfo")
