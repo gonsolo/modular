@@ -31,6 +31,7 @@ from std.memory import bitcast
 from .globals import global_constant
 
 from std.sys import is_apple_gpu
+from std.sys.info import is_intel_gpu
 from std.utils.numerics import FPUtils, isinf, isnan
 
 
@@ -132,11 +133,11 @@ def _write_float[
         return writer.write("2**", Int(bitcast[.uint8](value)) - 127)
 
     else:
-        # Apple GPU: use a simple float formatter that avoids i128
-        # and float64 operations. Apple GPU doesn't support UInt128
-        # (needed by dragonbox) or double→uint64 conversions.
-        # Use float32 arithmetic only.
-        comptime if is_apple_gpu():
+        # Apple and Intel GPU: use a simple float formatter that avoids i128
+        # and float64 operations. These targets don't support UInt128 (needed
+        # by dragonbox) or double→uint64 conversions, so format with float32
+        # arithmetic only.
+        comptime if is_apple_gpu() or is_intel_gpu():
             var f32 = value.cast[.float32]()
             var bits = bitcast[.uint32](f32)
             var is_neg = (bits >> 31) != 0
