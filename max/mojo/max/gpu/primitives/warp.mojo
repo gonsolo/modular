@@ -664,6 +664,16 @@ def lane_group_reduce[
             var result = lane_group_reduce[shuffle_down, num_lanes=16](val, add)
         ```
     """
+    # The strided group of `num_lanes` lanes occupies lanes
+    # {0, stride, 2*stride, ..., (num_lanes-1)*stride}. If that span reaches or
+    # exceeds WARP_SIZE, the shuffle offsets below run past the end of the warp
+    # and hit `shuffle_down`/`shuffle_xor`'s documented-undefined out-of-range
+    # region (on Intel this silently returns the lane's own value, so the
+    # reduction comes out wrong *without* any diagnostic). Fail loudly instead.
+    comptime assert (
+        (num_lanes - 1) * stride < WARP_SIZE
+    ), "lane_group_reduce: strided group (num_lanes, stride) exceeds WARP_SIZE"
+
     var res = val
 
     comptime limit = log2_floor(num_lanes)
