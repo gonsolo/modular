@@ -43,12 +43,14 @@ from std.sys.info import _cdna_4_or_newer, _cdna_5_or_newer
 
 from std.bit import log2_floor
 from std.math.math import max as _max, min as _min
-from std._gpu import lane_id
+from std._gpu import lane_id, thread_idx
 from std.memory import bitcast
+from std.memory import unsafe_stack_allocation
 
 from max._plugin import CurrentMaxPlugin
 from max.gpu.globals import WARP_SIZE
 from max.gpu.intrinsics import permlane_shuffle
+from max.gpu.sync import barrier
 
 comptime _FULL_MASK = UInt(2**WARP_SIZE - 1)
 
@@ -65,7 +67,6 @@ comptime _reduce_fn_signature = def[dtype: DType, width: SIMDLength](
 comptime _ReduceClosure = (
     ImplicitlyCopyable & RegisterPassable & _reduce_fn_signature
 )
-
 
 # ===-----------------------------------------------------------------------===#
 # AMD DPP (Data Parallel Primitives) intrinsics
@@ -664,6 +665,16 @@ def lane_group_reduce[
             var result = lane_group_reduce[shuffle_down, num_lanes=16](val, add)
         ```
     """
+    # The strided group of `num_lanes` lanes occupies lanes
+    # {0, stride, 2*stride, ..., (num_lanes-1)*stride}. If that span reaches or
+    # exceeds WARP_SIZE, the shuffle offsets below run past the end of the warp
+    # and hit `shuffle_down`/`shuffle_xor`'s documented-undefined out-of-range
+    # region (on Intel this silently returns the lane's own value, so the
+    # reduction comes out wrong *without* any diagnostic). Fail loudly instead.
+    comptime assert (
+        (num_lanes - 1) * stride < WARP_SIZE
+    ), "lane_group_reduce: strided group (num_lanes, stride) exceeds WARP_SIZE"
+
     var res = val
 
     comptime limit = log2_floor(num_lanes)
@@ -823,6 +834,129 @@ def sum(val: SIMD) -> Scalar[val.dtype]:
         The scalar sum of values across all lanes in the warp.
     """
     return lane_group_sum[num_lanes=WARP_SIZE](val.reduce_add())
+
+
+# ===-----------------------------------------------------------------------===#
+# Multi-warp strided lane-group reduce (group larger than one warp)
+# ===-----------------------------------------------------------------------===#
+#
+# `lane_group_reduce` is a single-warp primitive: its shuffle butterfly only
+# reaches lanes within one warp, so a strided group whose span
+# `(num_lanes - 1) * stride` is >= WARP_SIZE is out of bounds for it (guarded by
+# a comptime assert there). `lane_group_reduce_multiwarp` below defines that case
+# for any warp size: when the span fits a warp it delegates to the fast in-warp
+# butterfly; otherwise it either uses a vendor-optimized plugin implementation or
+# falls back to a correct-by-default generic reference that stages partials in
+# local (shared) memory and merges across warps with a work-group barrier.
+
+
+@inline(.always)
+def lane_group_reduce_multiwarp[
+    val_type: DType,
+    simd_width: SIMDLength,
+    FuncType: _ReduceClosure,
+    //,
+    num_lanes: Int,
+    stride: Int,
+    block_threads: Int,
+](val: SIMD[val_type, simd_width], func: FuncType) -> SIMD[
+    val_type, simd_width
+]:
+    """Reduce a strided lane group to one value, broadcast to every member,
+    *even when the group's span exceeds the warp size*.
+
+    This is the "write once, run anywhere" complement to `lane_group_reduce`
+    (which is a single-warp primitive and asserts the span fits a warp). The
+    caller passes `block_threads`, the launched block size, so the reduction can
+    span as many warps as the block contains.
+
+    Dispatch:
+      - span < WARP_SIZE  -> the fast in-warp butterfly (`lane_group_reduce`).
+      - span >= WARP_SIZE -> a vendor-optimized plugin implementation if the
+        active plugin provides one (see `MaxPluginHooks.strided_multiwarp_reduce_fn`),
+        else a correct-by-default generic reference (local-memory staging +
+        work-group barrier + merge).
+
+    Args:
+        val: The SIMD value; each group member contributes its value.
+        func: The binary combine (add/max/min/...). For the generic fallback this
+            must be a commutative+associative reduction; the in-warp and plugin
+            paths honor `func` exactly.
+        num_lanes: Group size (power of two >= 2).
+        stride: Spacing between group members.
+        block_threads: Launched block size (multiple of WARP_SIZE, >= span+1).
+
+    Returns:
+        A SIMD value holding the group reduction, broadcast to every member.
+    """
+    comptime span = (num_lanes - 1) * stride
+
+    comptime if span < WARP_SIZE:
+        # Fast path: identical to the existing single-warp butterfly.
+        return lane_group_reduce[
+            shuffle_xor, num_lanes=num_lanes, stride=stride
+        ](val, func)
+
+    # Out-of-warp. Dispatch to the plugin's out-of-warp reduce hook. The hook is
+    # a generic *method* on `MaxPluginHooks` (like `shuffle_idx_fn`); the default
+    # body *is* the correct-by-generic reference, so a backend that does not
+    # override it still gets a correct answer. A backend MAY override it with a
+    # hardware-tuned fast path. `dtype`/`simd_width`/`FuncType` are inferred from
+    # `val`/`func`; the group geometry (comptime) is bound explicitly.
+    return CurrentMaxPlugin.strided_multiwarp_reduce_fn[
+        num_lanes, stride, block_threads
+    ](val, func)
+
+
+# Generic reference that applies an arbitrary `func` (not just +). Mirrors the
+# `lane_group_reduce` closure pattern: `FuncType` is the closure type (template
+# param) and `func` is the value of that type.
+def _generic_multiwarp_strided_reduce_func[
+    val_type: DType,
+    simd_width: SIMDLength,
+    FuncType: _ReduceClosure,
+    num_lanes: Int,
+    stride: Int,
+    block_threads: Int,
+](
+    val: SIMD[val_type, simd_width],
+    func: FuncType,
+) -> SIMD[val_type, simd_width]:
+    comptime W = WARP_SIZE
+    comptime span = (num_lanes - 1) * stride
+    comptime assert block_threads % W == 0
+    comptime assert span + 1 <= block_threads, (
+        "block too small to hold the strided group"
+    )
+
+    var sram = unsafe_stack_allocation[
+        block_threads, Scalar[val_type], address_space=.SHARED
+    ]()
+
+    var lane = Int(thread_idx.x)
+    var group = lane % stride
+
+    for e in range(simd_width):
+        sram[lane * simd_width + e] = val[e]
+    barrier()
+
+    # Apply `func` across the group members (identity = first member's value).
+    var total: SIMD[val_type, simd_width] = SIMD[val_type, simd_width](
+        Scalar[val_type](0)
+    )
+    var started: Bool = False
+    for k in range(num_lanes):
+        var member = group + k * stride
+        if member < block_threads:
+            for e in range(simd_width):
+                var mv = SIMD[val_type, simd_width](sram[member * simd_width + e])
+                if not started:
+                    total[e] = mv[e]
+                    started = True
+                else:
+                    total[e] = func(total, mv)[e]
+
+    return total
 
 
 # ===-----------------------------------------------------------------------===#
