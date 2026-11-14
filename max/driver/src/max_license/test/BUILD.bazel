@@ -12,6 +12,15 @@ package(default_visibility = ["//visibility:public"])
 # `hal_test_dim` and `hal_test_targetinfo` are pure host-side (no kernel / no
 # GPU); the rest launch a kernel on the device.
 #
+# The two local-memory tests (`proto_multiwarp`, `multiwarp_reduce`) stage in
+# TRUE local (shared) memory (`unsafe_stack_allocation[.SHARED]`) and use a
+# work-group `barrier()`. On the single pinned B60, cross-warp local-memory
+# visibility is flaky under *concurrent* execution load (the staged values read
+# back zero), so run the suite sequentially for a clean signal:
+#   bazelw test --//:hal_device_context=true --jobs=1 //max/driver/src/max_license/test:*
+# (They always pass in isolation or with --jobs=1. See the plan doc §2.7; this
+# is a driver/IGC local-memory-visibility issue, not a test-runner artifact.)
+#
 # `ZE_AFFINITY_MASK=1` pins a single B60 (see the suite notes); drop it (or set
 # it to the relevant card) to run on a different device.
 
@@ -36,3 +45,5 @@ hal_gpu_test("hal_test_simd_insert")
 hal_gpu_test("hal_test_simd_reduction")
 hal_gpu_test("hal_test_sum")
 hal_gpu_test("hal_test_targetinfo")
+hal_gpu_test("proto_multiwarp")
+hal_gpu_test("multiwarp_reduce")
