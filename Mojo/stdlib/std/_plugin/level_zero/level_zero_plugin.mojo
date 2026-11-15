@@ -15,8 +15,10 @@ from std._plugin._trait import (
     TargetDeviceKind,
     PluginHooks,
     StdPlugin,
+    PrefetchOptions,
     _PrintEmitPluginHookFnType,
     _PrintfEmitPluginHookFnType,
+    _PrefetchPluginHookFnType,
 )
 from std.collections import OptionalReg
 from std.collections.string.string_span import _get_kgen_string, get_static_string
@@ -140,3 +142,25 @@ struct LevelZeroPluginHooks[target: CompilationTarget](PluginHooks):
     # the default (True) once the SPIR-V backend legalizes G_STEP_VECTOR (or the
     # stdlib stops emitting it), so the hardware gather path is used again.
     comptime has_generic_address_space: Bool = False
+
+    # Workaround: the default `prefetch` lowers to `llvm.prefetch` -> SPIR-V's OCL
+    # `__spirv_ocl_prefetch`, which the IGC backend does not provide a definition
+    # for (undefined reference at the device link). A prefetch is only a *hint*
+    # (correctness does not depend on it), so provide a no-op `prefetch_fn`: the
+    # portable `prefetch` op then builds + runs on the B60. Replace with a real
+    # IGC-supported cache hint once the backend exposes one (or once IGC ships
+    # `__spirv_ocl_prefetch`).
+    comptime prefetch_fn[
+        address_space: AddressSpace, params: PrefetchOptions
+    ]: OptionalReg[_PrefetchPluginHookFnType[address_space]] = _prefetch_noop[
+        address_space
+    ]
+
+
+@inline(.always)
+def _prefetch_noop[address_space: AddressSpace](
+    addr: Pointer[NoneType, ImmUntrackedOrigin, address_space=address_space]
+) -> None:
+    # No-op: IGC has no `__spirv_ocl_prefetch` builtin to resolve. A prefetch is a
+    # hint only, so doing nothing is correct. (See the prefetch_fn comment.)
+    pass

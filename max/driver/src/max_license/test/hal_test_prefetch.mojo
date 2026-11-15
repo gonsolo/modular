@@ -1,27 +1,25 @@
-"""Portable prefetch on the B60 -- DOCUMENTED GAP (does not build on intel:xe2).
+"""Portable prefetch, run through the HAL DeviceContext.
 
 Bucket A, item 4 of the completeness plan. The portable *purpose* of the vendor
 prefetch tests (which assert on the NVIDIA PTX `prefetch` asm string) is "the
-prefetch op works on the target." Finding on the B60: it does NOT build.
+prefetch op works on the target." Here we verify the portable
+`std.sys.intrinsics.prefetch` op BUILDS and RUNS correctly on the B60 (the
+prefetched data is read back correctly). We skip the PTX-asm-string assertion
+(vendor "how"); the point is that the prefetch *operation* works on the
+Intel/Level Zero target.
 
-The portable `std.sys.intrinsics.prefetch` lowers, on the Intel target, to
-SPIR-V's OCL `__spirv_ocl_prefetch` (the Level Zero plugin does not provide a
-`prefetch_fn`, so `prefetch` falls back to `llvm.prefetch` -> `__spirv_ocl_prefetch`).
-The link step then fails with an undefined reference:
-
-    undefined reference to `_Z20__spirv_ocl_prefetchPU3AS4KPKcm'
-    (__spirv_ocl_prefetch(char const* const AS4*, unsigned long))
-
-i.e. the SPIR-V/IGC backend does not provide a definition for
-`__spirv_ocl_prefetch` on this target. This is a distinct Intel/SPIR-V gap
-(separate from the G_STEP_VECTOR gather gap, modular/modular#7620).
-
-So this test is kept for documentation / as a canary (uncomment the BUILD entry
-in BUILD.bazel to reproduce), but is NOT registered as an active hal_gpu_test --
-it would break the suite. Re-enable once the backend provides
-`__spirv_ocl_prefetch` (or the Level Zero plugin supplies a `prefetch_fn`).
+Background (a gap we worked around): out of the box, `prefetch` on the Intel
+target lowers to `llvm.prefetch` -> SPIR-V's OCL `__spirv_ocl_prefetch`, which
+the IGC backend does not provide a definition for (undefined reference at the
+device link). A prefetch is only a *hint* (correctness does not depend on it),
+so the Level Zero *std* plugin supplies a no-op `prefetch_fn` (see
+`Mojo/stdlib/std/_plugin/level_zero/level_zero_plugin.mojo`), which makes the
+portable `prefetch` op build + run here. Replace the no-op with a real
+IGC-supported cache hint once the backend exposes one.
 
 Only deps on the HAL `max` + `std` (minimal-HAL style, like our other tests).
+
+Run via Bazel:  //max/driver/src/max_license/test:hal_test_prefetch.mojo.test
 """
 
 from std.sys.intrinsics import prefetch

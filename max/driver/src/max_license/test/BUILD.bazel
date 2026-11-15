@@ -28,14 +28,7 @@ hal_gpu_test("hal_test_add_constant")
 hal_gpu_test("hal_test_buffer_io")
 hal_gpu_test("hal_test_fast_div")
 hal_gpu_test("hal_test_spirv_codegen")
-# `hal_test_prefetch` is excluded: the portable `prefetch` op lowers to SPIR-V's
-# OCL `__spirv_ocl_prefetch`, which the Intel/IGC link step cannot resolve
-# (undefined reference to `_Z20__spirv_ocl_prefetchPU3AS4KPKcm`). The Level Zero
-# plugin does not provide a `prefetch_fn`, so `prefetch` falls back to
-# `llvm.prefetch` -> `__spirv_ocl_prefetch`, which has no definition on this
-# target. Re-enable once the backend provides `__spirv_ocl_prefetch` (or the
-# plugin supplies a `prefetch_fn`). See hal_test_prefetch.mojo.
-# hal_gpu_test("hal_test_prefetch")
+hal_gpu_test("hal_test_prefetch")
 hal_gpu_test("hal_test_barrier")
 # `hal_test_cast_roundtrip` is excluded: it exercises a `BFloat16 -> Float32`
 # cast, which the Intel/SPIR-V target rejects with
