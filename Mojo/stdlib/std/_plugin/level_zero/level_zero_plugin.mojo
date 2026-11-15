@@ -128,3 +128,15 @@ struct LevelZeroPluginHooks[target: CompilationTarget](PluginHooks):
     comptime printf_emit_fn[fmt: StaticString, *types: AnyType]: OptionalReg[
         _PrintfEmitPluginHookFnType[*types]
     ] = _printf_emit[fmt, *types]
+
+    # Workaround for modular/modular#7620: the `gather`/`scatter` intrinsic (used
+    # by strided_load / strided_store / vector load / vector store when a generic
+    # address space is available) lowers to a `G_STEP_VECTOR` to build its
+    # offset-vector, which the SPIR-V/IGC GISel backend does not legalize -- so a
+    # width>1 vectorized gather fails to compile on intel:xe2. Setting this to
+    # False routes those ops through the scalar per-lane loop instead, which is
+    # correct (it does `width` scalar loads/stores) and builds. The cost is the
+    # lost vectorized-gather performance, which is acceptable here. Flip back to
+    # the default (True) once the SPIR-V backend legalizes G_STEP_VECTOR (or the
+    # stdlib stops emitting it), so the hardware gather path is used again.
+    comptime has_generic_address_space: Bool = False
