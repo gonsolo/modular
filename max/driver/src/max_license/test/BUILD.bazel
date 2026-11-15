@@ -25,6 +25,8 @@ package(default_visibility = ["//visibility:public"])
 # it to the relevant card) to run on a different device.
 
 hal_gpu_test("hal_test_add_constant")
+hal_gpu_test("hal_test_buffer_io")
+hal_gpu_test("hal_test_fast_div")
 hal_gpu_test("hal_test_barrier")
 # `hal_test_cast_roundtrip` is excluded: it exercises a `BFloat16 -> Float32`
 # cast, which the Intel/SPIR-V target rejects with
