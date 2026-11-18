@@ -33,7 +33,11 @@ from max.gpu.memory.memory import (
     _AsyncCopyGroupPluginHookFnType,
     _AsyncCopyWaitGroupPluginHookFnType,
 )
-from max.gpu.primitives.warp import _FULL_MASK
+from max.gpu.primitives.warp import (
+    _FULL_MASK,
+    _ReduceClosure,
+    _generic_multiwarp_strided_reduce_func,
+)
 from max.gpu.sync.sync import (
     _BarrierPluginHookFnType,
     _SyncwarpPluginHookFnType,
@@ -114,6 +118,49 @@ trait MaxPluginHooks:
     Args:
         mask: The lanes taking part; a target without lane masks ignores it.
     """
+
+    @inline(.always)
+    @staticmethod
+    def strided_multiwarp_reduce_fn[
+        dtype: DType,
+        simd_width: SIMDLength,
+        FuncType: _ReduceClosure,
+        //,
+        num_lanes: Int,
+        stride: Int,
+        block_threads: Int,
+    ](
+        val: SIMD[dtype, simd_width],
+        func: FuncType,
+    ) -> SIMD[dtype, simd_width]:
+        """Out-of-warp strided lane-group reduction (group spans multiple warps).
+
+        `warp.lane_group_reduce_multiwarp` calls this when a strided group's span
+        `(num_lanes-1)*stride` exceeds `WARP_SIZE`. The default *is* the
+        correct-by-generic reference (local-memory staging + work-group barrier +
+        merge); a backend MAY override it with a hardware-tuned fast path. It is
+        always correct to leave the default in place — overriding is a
+        performance optimization only.
+
+        Parameters:
+            dtype: The element type of `val`.
+            simd_width: The number of elements in `val`.
+            FuncType: The reduction closure's type.
+            num_lanes: Group size (power of two >= 2).
+            stride: Spacing between group members.
+            block_threads: Launched block size (multiple of `WARP_SIZE`,
+                >= span+1).
+
+        Args:
+            val: The SIMD value; each group member contributes its value.
+            func: The binary combine (add/max/min/...).
+
+        Returns:
+            A SIMD value holding the group reduction, broadcast to every member.
+        """
+        return _generic_multiwarp_strided_reduce_func[
+            dtype, simd_width, FuncType, num_lanes, stride, block_threads
+        ](val, func)
 
     comptime async_copy_commit_group_fn: OptionalReg[
         _AsyncCopyGroupPluginHookFnType
