@@ -1,0 +1,669 @@
+--- a/llvm/lib/Target/SPIRV/SPIRVPostLegalizer.cpp
++++ b/llvm/lib/Target/SPIRV/SPIRVPostLegalizer.cpp
+@@ -333,7 +333,23 @@
+   }
+   case TargetOpcode::G_LOAD: {
+     SPIRVTypeInst PtrType = deduceTypeFromSingleOperand(I, MIB, GR, 1);
+-    return PtrType ? GR->getPointeeType(PtrType) : nullptr;
++    SPIRVTypeInst Pointee = PtrType ? GR->getPointeeType(PtrType) : nullptr;
++    // After narrowing, prefer the result LLT over a stale pointer pointee type.
++    if (Pointee) {
++      LLT ResLLT = MIB.getMRI()->getType(ResVReg);
++      if (ResLLT.isValid() && ResLLT.isScalar() && !ResLLT.isPointer()) {
++        unsigned Bits = ResLLT.getSizeInBits();
++        unsigned PTBits = GR->getScalarOrVectorBitWidth(Pointee);
++        if (Bits == 1 && Pointee->getOpcode() != SPIRV::OpTypeBool)
++          return GR->getOrCreateSPIRVBoolType(MIB, false);
++        if (Bits != 1 && Pointee->getOpcode() == SPIRV::OpTypeInt &&
++            PTBits != Bits)
++          return GR->getOrCreateSPIRVIntegerType(Bits, MIB);
++      }
++    }
++    if (!Pointee)
++      Pointee = deduceIntTypeFromResult(ResVReg, MIB, GR);
++    return Pointee;
+   }
+   case TargetOpcode::G_PHI: {
+     for (unsigned Idx = 1; Idx < I->getNumOperands(); Idx += 2) {
+@@ -356,10 +372,25 @@
+                                            MachineIRBuilder &MIB) {
+   MachineRegisterInfo &MRI = MF.getRegInfo();
+   Register SrcReg = I->getOperand(I->getNumOperands() - 1).getReg();
++  LLT SrcLLT = MRI.getType(SrcReg);
+   SPIRVTypeInst ScalarType = nullptr;
+   if (SPIRVTypeInst DefType = GR->getSPIRVTypeForVReg(SrcReg)) {
+-    assert(isVectorType(DefType));
+-    ScalarType = GR->getScalarOrVectorComponentType(DefType);
++    if (isVectorType(DefType)) {
++      ScalarType = GR->getScalarOrVectorComponentType(DefType);
++    } else if (SrcLLT.isValid() && SrcLLT.isScalar()) {
++      // Scalar unmerge (e.g. narrowing i128 to i64 pairs): derive the
++      // component type from the result element size rather than the
++      // unsupported wide source type.
++      unsigned NumDefs = I->getNumDefs();
++      if (NumDefs > 0) {
++        LLT DefLLT = MRI.getType(I->getOperand(0).getReg());
++        unsigned Bits = DefLLT.isVector() ? DefLLT.getElementType().getSizeInBits()
++                                          : DefLLT.getSizeInBits();
++        ScalarType = GR->getOrCreateSPIRVIntegerType(Bits, MIB);
++      }
++    } else {
++      ScalarType = GR->getScalarOrVectorComponentType(DefType);
++    }
+   }
+ 
+   if (!ScalarType) {
+@@ -375,10 +406,24 @@
+     }
+   }
+ 
++  if (!ScalarType) {
++    // Fallback for scalar artifacts with no known SPIR-V type context.
++    unsigned NumDefs = I->getNumDefs();
++    if (NumDefs > 0) {
++      LLT DefLLT = MRI.getType(I->getOperand(0).getReg());
++      if (DefLLT.isValid() && DefLLT.isScalar()) {
++        ScalarType = GR->getOrCreateSPIRVIntegerType(DefLLT.getSizeInBits(), MIB);
++      } else if (DefLLT.isValid() && DefLLT.isVector()) {
++        ScalarType = GR->getOrCreateSPIRVIntegerType(
++            DefLLT.getElementType().getSizeInBits(), MIB);
++      }
++    }
++  }
++
+   if (!ScalarType)
+     return false;
+ 
+-  for (unsigned i = 0; i < I->getNumOperands(); ++i) {
++  for (unsigned i = 0; i < I->getNumDefs(); ++i) {
+     Register DefReg = I->getOperand(i).getReg();
+     if (GR->getSPIRVTypeForVReg(DefReg))
+       continue;
+@@ -387,8 +432,7 @@
+     SPIRVTypeInst ResType =
+         DefLLT.isVector()
+             ? GR->getOrCreateSPIRVVectorType(
+-                  ScalarType, DefLLT.getNumElements(), *I,
+-                  *MF.getSubtarget<SPIRVSubtarget>().getInstrInfo())
++                  ScalarType, DefLLT.getNumElements(), MIB, false)
+             : ScalarType;
+     setRegClassType(DefReg, ResType, GR, &MRI, MF);
+   }
+@@ -408,6 +452,39 @@
+   if (I->getOpcode() == TargetOpcode::G_UNMERGE_VALUES)
+     return deduceAndAssignTypeForGUnmerge(I, MF, GR, MIB);
+ 
++  // Overflow/carry arithmetic produces a value result and a bool carry/overflow.
++  switch (I->getOpcode()) {
++  case TargetOpcode::G_UADDO:
++  case TargetOpcode::G_SADDO:
++  case TargetOpcode::G_USUBO:
++  case TargetOpcode::G_SSUBO:
++  case TargetOpcode::G_UMULO:
++  case TargetOpcode::G_SMULO:
++  case TargetOpcode::G_UADDE:
++  case TargetOpcode::G_SADDE:
++  case TargetOpcode::G_USUBE:
++  case TargetOpcode::G_SSUBE: {
++    SPIRVTypeInst ValType = nullptr;
++    if (!GR->getSPIRVTypeForVReg(ResVReg)) {
++      ValType = deduceTypeFromSingleOperand(I, MIB, GR, 2);
++      if (!ValType)
++        ValType = deduceIntTypeFromResult(ResVReg, MIB, GR);
++      if (ValType)
++        setRegClassType(ResVReg, ValType, GR, &MRI, MF);
++    }
++    if (I->getNumDefs() > 1) {
++      Register CarryReg = I->getOperand(1).getReg();
++      if (CarryReg && !GR->getSPIRVTypeForVReg(CarryReg)) {
++        SPIRVTypeInst BoolTy = GR->getOrCreateSPIRVBoolType(MIB, false);
++        setRegClassType(CarryReg, BoolTy, GR, &MRI, MF);
++      }
++    }
++    return GR->getSPIRVTypeForVReg(ResVReg) != nullptr;
++  }
++  default:
++    break;
++  }
++
+   LLVM_DEBUG(dbgs() << "Inferring type from operands\n");
+   SPIRVTypeInst ResType = deduceResultTypeFromOperands(I, GR, MIB);
+   if (!ResType) {
+@@ -419,7 +496,22 @@
+     return false;
+ 
+   LLVM_DEBUG(dbgs() << "Assigned type to " << *I << ": " << *ResType);
+-  setRegClassType(ResVReg, ResType, GR, &MRI, MF);
++  if (!GR->getSPIRVTypeForVReg(ResVReg))
++    setRegClassType(ResVReg, ResType, GR, &MRI, MF);
++  // Assign default types for any other defs that are still missing.
++  for (unsigned Idx = 1; Idx < I->getNumDefs(); ++Idx) {
++    Register D = I->getOperand(Idx).getReg();
++    if (!D || GR->getSPIRVTypeForVReg(D))
++      continue;
++    LLT DLT = MRI.getType(D);
++    SPIRVTypeInst DT = nullptr;
++    if (DLT.isValid() && DLT.isScalar() && DLT.getSizeInBits() == 1)
++      DT = GR->getOrCreateSPIRVBoolType(MIB, false);
++    else if (DLT.isValid() && DLT.isScalar())
++      DT = GR->getOrCreateSPIRVIntegerType(DLT.getSizeInBits(), MIB);
++    if (DT)
++      setRegClassType(D, DT, GR, &MRI, MF);
++  }
+   return true;
+ }
+ 
+@@ -437,18 +529,22 @@
+     return false;
+   }
+ 
+-  Register ResultRegister = I.defs().begin()->getReg();
+-  if (GR->getSPIRVTypeForVReg(ResultRegister)) {
+-    LLVM_DEBUG(dbgs() << "Instruction already has a SPIR-V type.\n");
+-    if (!MRI.getRegClassOrNull(ResultRegister)) {
+-      LLVM_DEBUG(dbgs() << "Updating the register class.\n");
+-      setRegClassType(ResultRegister, GR->getSPIRVTypeForVReg(ResultRegister),
+-                      GR, &MRI, *GR->CurMF, true);
++  bool Missing = false;
++  for (const MachineOperand &Def : I.defs()) {
++    if (!Def.isReg())
++      continue;
++    Register R = Def.getReg();
++    if (!R)
++      continue;
++    if (GR->getSPIRVTypeForVReg(R)) {
++      if (!MRI.getRegClassOrNull(R))
++        setRegClassType(R, GR->getSPIRVTypeForVReg(R), GR, &MRI, *GR->CurMF,
++                        true);
++    } else {
++      Missing = true;
+     }
+-    return false;
+   }
+-
+-  return true;
++  return Missing;
+ }
+ 
+ static void registerSpirvTypeForNewInstructions(MachineFunction &MF,
+@@ -505,8 +601,12 @@
+             ResLLT.getElementType().getSizeInBits(), MIB);
+         ResType = GR->getOrCreateSPIRVVectorType(
+             CompType, ResLLT.getNumElements(), MIB, false);
+-      } else {
++      } else if (ResLLT.isScalar() && ResLLT.getSizeInBits() == 1) {
++        ResType = GR->getOrCreateSPIRVBoolType(MIB, false);
++      } else if (ResLLT.isValid() && ResLLT.isScalar()) {
+         ResType = GR->getOrCreateSPIRVIntegerType(ResLLT.getSizeInBits(), MIB);
++      } else {
++        ResType = GR->getOrCreateSPIRVIntegerType(32, MIB);
+       }
+       setRegClassType(ResVReg, ResType, GR, &MRI, MF, true);
+     }
+@@ -582,6 +682,40 @@
+       }
+ 
+       SPIRVTypeInst ResultType = GR->getSPIRVTypeForVReg(ResultRegister);
++      // After scalar narrowing (e.g. i128 -> i64 pairs), registry types can be
++      // stale. Prefer the current LLT for plain scalar integer results.
++      if (ResultType) {
++        LLT ResLLT = MRI.getType(ResultRegister);
++        if (ResLLT.isValid() && ResLLT.isScalar() && !ResLLT.isPointer()) {
++          unsigned Opcode = MI.getOpcode();
++          if (Opcode != TargetOpcode::G_ICMP && Opcode != TargetOpcode::G_FCMP &&
++              Opcode != TargetOpcode::G_SELECT &&
++              Opcode != TargetOpcode::G_PTRTOINT &&
++              Opcode != TargetOpcode::G_INTTOPTR &&
++              Opcode != TargetOpcode::G_BITCAST &&
++              Opcode != TargetOpcode::G_ADDRSPACE_CAST &&
++              Opcode != TargetOpcode::G_PTR_ADD &&
++              Opcode != TargetOpcode::G_EXTRACT_VECTOR_ELT &&
++              Opcode != TargetOpcode::G_INSERT_VECTOR_ELT) {
++            const SPIRVSubtarget &ST =
++                MF.getSubtarget<SPIRVSubtarget>();
++            const SPIRVInstrInfo &TII = *ST.getInstrInfo();
++            unsigned Bits = ResLLT.getSizeInBits();
++            if (Bits == 1) {
++              if (ResultType->getOpcode() != SPIRV::OpTypeBool) {
++                ResultType = GR->getOrCreateSPIRVBoolType(MI, TII);
++                setRegClassType(ResultRegister, ResultType, GR, &MRI, MF, true);
++              }
++            } else if (ResultType->getOpcode() == SPIRV::OpTypeInt) {
++              unsigned SPVBits = GR->getScalarOrVectorBitWidth(ResultType);
++              if (SPVBits != Bits) {
++                ResultType = GR->getOrCreateSPIRVIntegerType(Bits, MI, TII);
++                setRegClassType(ResultRegister, ResultType, GR, &MRI, MF, true);
++              }
++            }
++          }
++        }
++      }
+       generateAssignType(MI, ResultRegister, ResultType, GR, MRI);
+     }
+   }
+@@ -590,10 +724,425 @@
+ static bool runPostLegalizer(MachineFunction &MF) {
+   // Initialize the type registry.
+   const SPIRVSubtarget &ST = MF.getSubtarget<SPIRVSubtarget>();
++  const SPIRVInstrInfo &TII = *ST.getInstrInfo();
+   SPIRVGlobalRegistry *GR = ST.getSPIRVGlobalRegistry();
+   GR->setCurrentFunc(MF);
++  MachineRegisterInfo &MRI = MF.getRegInfo();
++  // Scalar G_MERGE_VALUES can survive as legalization artifacts (e.g. when
++  // narrowing i128 operations). SPIR-V has no generic merge instruction, so
++  // decompose scalar merges into shifts and bitwise ops when the result type
++  // is representable.
++  for (MachineBasicBlock &MBB : MF) {
++    for (MachineInstr &MI : make_early_inc_range(MBB)) {
++      if (MI.getOpcode() != TargetOpcode::G_MERGE_VALUES)
++        continue;
++      if (MI.getNumDefs() != 1)
++        continue;
++      Register Dst = MI.getOperand(0).getReg();
++      LLT DstTy = MRI.getType(Dst);
++      if (!DstTy.isValid() || !DstTy.isScalar())
++        continue;
++      unsigned NumSrcs = MI.getNumOperands() - 1;
++      if (NumSrcs == 0)
++        continue;
++      Register FirstSrc = MI.getOperand(1).getReg();
++      LLT SrcTy = MRI.getType(FirstSrc);
++      if (!SrcTy.isValid() || !SrcTy.isScalar())
++        continue;
++      unsigned SrcBits = SrcTy.getSizeInBits();
++      unsigned DstBits = DstTy.getSizeInBits();
++      if (DstBits == 0 || DstBits > 64 || SrcBits == 0)
++        continue;
++      MachineIRBuilder MIB(MI);
++      Register Acc = MIB.buildZExtOrTrunc(DstTy, FirstSrc).getReg(0);
++      for (unsigned I = 1; I < NumSrcs; ++I) {
++        unsigned Offset = I * SrcBits;
++        if (Offset >= DstBits)
++          continue;
++        Register Src = MI.getOperand(1 + I).getReg();
++        Register Part = MIB.buildZExtOrTrunc(DstTy, Src).getReg(0);
++        if (Offset != 0) {
++          auto ShiftAmt = MIB.buildConstant(DstTy, Offset);
++          Part = MIB.buildShl(DstTy, Part, ShiftAmt).getReg(0);
++        }
++        Acc = MIB.buildOr(DstTy, Acc, Part).getReg(0);
++      }
++      MRI.replaceRegWith(Dst, Acc);
++      MI.eraseFromParent();
++    }
++  }
++
++  // Scalar G_UNMERGE_VALUES with a scalar source are similarly artifacts.
++  for (MachineBasicBlock &MBB : MF) {
++    for (MachineInstr &MI : make_early_inc_range(MBB)) {
++      if (MI.getOpcode() != TargetOpcode::G_UNMERGE_VALUES)
++        continue;
++      unsigned NumDefs = MI.getNumDefs();
++      if (NumDefs == 0 || MI.getNumOperands() != NumDefs + 1)
++        continue;
++      Register Src = MI.getOperand(NumDefs).getReg();
++      LLT SrcTy = MRI.getType(Src);
++      if (!SrcTy.isValid() || !SrcTy.isScalar())
++        continue;
++      Register FirstDst = MI.getOperand(0).getReg();
++      LLT DstTy = MRI.getType(FirstDst);
++      if (!DstTy.isValid() || !DstTy.isScalar())
++        continue;
++      unsigned DstBits = DstTy.getSizeInBits();
++      unsigned SrcBits = SrcTy.getSizeInBits();
++      if (SrcBits == 0 || SrcBits > 64 || DstBits == 0)
++        continue;
++      MachineIRBuilder MIB(MI);
++      for (unsigned I = 0; I < NumDefs; ++I) {
++        Register Dst = MI.getOperand(I).getReg();
++        Register Val;
++        unsigned Offset = I * DstBits;
++        if (Offset == 0) {
++          Val = MIB.buildTrunc(DstTy, Src).getReg(0);
++        } else if (Offset >= SrcBits) {
++          Val = MIB.buildConstant(DstTy, 0).getReg(0);
++        } else {
++          auto ShiftAmt = MIB.buildConstant(SrcTy, Offset);
++          auto Shifted = MIB.buildLShr(SrcTy, Src, ShiftAmt);
++          Val = MIB.buildTrunc(DstTy, Shifted).getReg(0);
++        }
++        MRI.replaceRegWith(Dst, Val);
++      }
++      MI.eraseFromParent();
++    }
++  }
++
++  registerSpirvTypeForNewInstructions(MF, GR);
++  // Narrow shift amounts that were split into i128 merge artifacts back to the
++  // value/result scalar width. Narrowing can turn an i128 amount into
++  // G_MERGE_VALUES(lo, hi); SPIR-V shifts require a compatible scalar amount.
++  for (MachineBasicBlock &MBB : MF) {
++    for (MachineInstr &MI : make_early_inc_range(MBB)) {
++      unsigned Opc = MI.getOpcode();
++      if (Opc != TargetOpcode::G_SHL && Opc != TargetOpcode::G_LSHR &&
++          Opc != TargetOpcode::G_ASHR)
++        continue;
++      if (MI.getNumOperands() < 3)
++        continue;
++      Register AmtReg = MI.getOperand(2).getReg();
++      LLT AmtLLT = MRI.getType(AmtReg);
++      LLT ValLLT = MRI.getType(MI.getOperand(1).getReg());
++      if (!AmtLLT.isValid() || !AmtLLT.isScalar() || !ValLLT.isValid() ||
++          !ValLLT.isScalar())
++        continue;
++      if (AmtLLT.getSizeInBits() <= ValLLT.getSizeInBits())
++        continue;
++      MachineInstr *AmtDef = MRI.getVRegDef(AmtReg);
++      Register NewAmt;
++      if (AmtDef && AmtDef->getOpcode() == TargetOpcode::G_MERGE_VALUES &&
++          AmtDef->getNumOperands() >= 3) {
++        NewAmt = AmtDef->getOperand(1).getReg();
++      } else {
++        MachineIRBuilder MIB(MI);
++        auto Tr = MIB.buildTrunc(ValLLT, AmtReg);
++        NewAmt = Tr.getReg(0);
++      }
++      MI.getOperand(2).setReg(NewAmt);
++    }
++  }
++
++  // SPIR-V cannot represent i128 integer types without extensions. Replace
++  // i128 integer type definitions with <2 x i64> vectors so values split into
++  // 64-bit halves remain representable.
++  for (MachineBasicBlock &MBB : MF) {
++    for (MachineInstr &MI : make_early_inc_range(MBB)) {
++      if (MI.getOpcode() != SPIRV::OpTypeInt || MI.getNumOperands() < 2 ||
++          !MI.getOperand(1).isImm() || MI.getOperand(1).getImm() != 128)
++        continue;
++      Register Res = MI.getOperand(0).getReg();
++      MachineIRBuilder MIB(MI);
++      SPIRVTypeInst I64Ty = GR->getOrCreateSPIRVIntegerType(64, MIB);
++      MI.setDesc(TII.get(SPIRV::OpTypeVector));
++      // Keep def, replace remaining operands with component type and count.
++      while (MI.getNumOperands() > 1)
++        MI.removeOperand(MI.getNumOperands() - 1);
++      MI.addOperand(MachineOperand::CreateReg(GR->getSPIRVTypeID(I64Ty), false));
++      MI.addOperand(MachineOperand::CreateImm(2));
++      (void)Res;
++    }
++  }
++  ensureAssignTypeForTypeFolding(MF, GR);
++
++  // Late cleanup: decompose any remaining scalar merge/unmerge artifacts that
++  // survived type assignment/folding (e.g. due to stale or missing LLTs earlier).
++  auto getScalarBits = [&](Register R) -> unsigned {
++    LLT Ty = MRI.getType(R);
++    if (Ty.isValid() && Ty.isScalar())
++      return Ty.getSizeInBits();
++    if (SPIRVTypeInst SpvTy = GR->getSPIRVTypeForVReg(R)) {
++      unsigned BW = GR->getScalarOrVectorBitWidth(SpvTy);
++      if (BW)
++        return BW;
++    }
++    return 0;
++  };
++
++  // Unrepresentable wide integer merges (e.g. i128 = merge of 2xi64) are
++  // represented as <N x i64> vectors after i128 type legalization. Convert them
++  // into vector construction so SPIR-V can select/represent them.
++  for (MachineBasicBlock &MBB : MF) {
++    for (MachineInstr &MI : make_early_inc_range(MBB)) {
++      if (MI.getOpcode() != TargetOpcode::G_MERGE_VALUES || MI.getNumDefs() != 1)
++        continue;
++      Register Dst = MI.getOperand(0).getReg();
++      unsigned NumSrcs = MI.getNumOperands() - 1;
++      if (NumSrcs == 0)
++        continue;
++      unsigned DstBits = getScalarBits(Dst);
++      unsigned SrcBits = getScalarBits(MI.getOperand(1).getReg());
++      if (DstBits == 0 || SrcBits == 0) {
++        if (NumSrcs == 2)
++          DstBits = SrcBits = 64;
++      }
++      if (DstBits == 0 || DstBits <= 64 || SrcBits == 0 ||
++          SrcBits * NumSrcs != DstBits)
++        continue;
++
++      SmallVector<Register, 4> SrcRegs;
++      bool AllConst = true;
++      for (unsigned I = 0; I < NumSrcs; ++I) {
++        Register Src = MI.getOperand(1 + I).getReg();
++        LLT STy = MRI.getType(Src);
++        if (!STy.isValid() || !STy.isScalar())
++          MRI.setType(Src, LLT::scalar(SrcBits));
++        SrcRegs.push_back(Src);
++        MachineInstr *SrcDef = MRI.getVRegDef(Src);
++        if (!SrcDef) {
++          AllConst = false;
++          continue;
++        }
++        unsigned SOpc = SrcDef->getOpcode();
++        bool IsConst = SOpc == TargetOpcode::G_CONSTANT ||
++                       SOpc == TargetOpcode::G_FCONSTANT ||
++                       SOpc == SPIRV::OpConstantI ||
++                       SOpc == SPIRV::OpConstantF ||
++                       SOpc == SPIRV::OpConstantTrue ||
++                       SOpc == SPIRV::OpConstantFalse ||
++                       SOpc == SPIRV::OpConstantNull ||
++                       SOpc == SPIRV::OpConstantComposite ||
++                       SOpc == SPIRV::OpSpecConstantComposite ||
++                       SOpc == SPIRV::OpUndef;
++        if (!IsConst && (SOpc == TargetOpcode::G_INTRINSIC ||
++                         SOpc == TargetOpcode::G_INTRINSIC_W_SIDE_EFFECTS ||
++                         SOpc == TargetOpcode::G_INTRINSIC_CONVERGENT ||
++                         SOpc == TargetOpcode::G_INTRINSIC_CONVERGENT_W_SIDE_EFFECTS)) {
++          auto ID = cast<GIntrinsic>(SrcDef)->getIntrinsicID();
++          IsConst = (ID == Intrinsic::spv_const_composite ||
++                     ID == Intrinsic::spv_track_constant ||
++                     ID == Intrinsic::spv_undef);
++        }
++        if (!IsConst)
++          AllConst = false;
++      }
++      bool AllUsesInComposite = !MRI.use_nodbg_empty(Dst);
++      if (AllUsesInComposite) {
++        for (MachineInstr &UseMI : MRI.use_nodbg_instructions(Dst)) {
++          if (!isSpvIntrinsic(UseMI, Intrinsic::spv_const_composite)) {
++            AllUsesInComposite = false;
++            break;
++          }
++        }
++      }
++      if (!AllConst && !AllUsesInComposite)
++        continue;
++      LLT VecTy = LLT::fixed_vector(NumSrcs, SrcBits);
++      MRI.setType(Dst, VecTy);
++      MachineIRBuilder MIB(MI);
++      SPIRVTypeInst ElemTy = GR->getOrCreateSPIRVIntegerType(SrcBits, MIB);
++      SPIRVTypeInst SpvVecTy =
++          GR->getOrCreateSPIRVVectorType(ElemTy, NumSrcs, MIB, false);
++      GR->assignSPIRVTypeToVReg(SpvVecTy, Dst, MF);
++      auto NewMI = MIB.buildInstr(TargetOpcode::G_INTRINSIC_W_SIDE_EFFECTS)
++                       .addDef(Dst)
++                       .addIntrinsicID(Intrinsic::spv_const_composite);
++      for (Register Src : SrcRegs)
++        NewMI.addUse(Src);
++      MI.eraseFromParent();
++    }
++  }
++
++  for (MachineBasicBlock &MBB : MF) {
++    for (MachineInstr &MI : make_early_inc_range(MBB)) {
++      if (MI.getOpcode() == TargetOpcode::G_MERGE_VALUES) {
++        if (MI.getNumDefs() != 1)
++          continue;
++        Register Dst = MI.getOperand(0).getReg();
++        unsigned NumSrcs = MI.getNumOperands() - 1;
++        if (NumSrcs == 0)
++          continue;
++        unsigned DstBits = getScalarBits(Dst);
++        unsigned SrcBits = getScalarBits(MI.getOperand(1).getReg());
++        if (DstBits == 0 || SrcBits == 0) {
++          if (NumSrcs == 2)
++            DstBits = SrcBits = 64;
++        }
++        if (DstBits == 0 || DstBits > 64 || SrcBits == 0) {
++          if (MRI.use_nodbg_empty(Dst))
++            MI.eraseFromParent();
++          continue;
++        }
++        LLT DstTy = MRI.getType(Dst);
++        if (!DstTy.isValid() || !DstTy.isScalar())
++          DstTy = LLT::scalar(DstBits);
++        MRI.setType(Dst, DstTy);
++        // Ensure source types are set for builder.
++        for (unsigned I = 0; I < NumSrcs; ++I) {
++          Register Src = MI.getOperand(1 + I).getReg();
++          LLT STy = MRI.getType(Src);
++          if (!STy.isValid() || !STy.isScalar())
++            MRI.setType(Src, LLT::scalar(SrcBits));
++        }
++        MachineIRBuilder MIB(MI);
++        Register Acc = MIB.buildZExtOrTrunc(DstTy, MI.getOperand(1).getReg()).getReg(0);
++        for (unsigned I = 1; I < NumSrcs; ++I) {
++          unsigned Offset = I * SrcBits;
++          if (Offset >= DstBits)
++            continue;
++          Register Src = MI.getOperand(1 + I).getReg();
++          Register Part = MIB.buildZExtOrTrunc(DstTy, Src).getReg(0);
++          if (Offset != 0) {
++            auto ShiftAmt = MIB.buildConstant(DstTy, Offset);
++            Part = MIB.buildShl(DstTy, Part, ShiftAmt).getReg(0);
++          }
++          Acc = MIB.buildOr(DstTy, Acc, Part).getReg(0);
++        }
++        MRI.replaceRegWith(Dst, Acc);
++        MI.eraseFromParent();
++      } else if (MI.getOpcode() == TargetOpcode::G_UNMERGE_VALUES) {
++        unsigned NumDefs = MI.getNumDefs();
++        if (NumDefs == 0 || MI.getNumOperands() != NumDefs + 1)
++          continue;
++        Register Src = MI.getOperand(NumDefs).getReg();
++        LLT SrcLLT = MRI.getType(Src);
++        if (SrcLLT.isValid() && SrcLLT.isVector())
++          continue;
++        unsigned SrcBits = getScalarBits(Src);
++        unsigned DstBits = getScalarBits(MI.getOperand(0).getReg());
++        if (SrcBits == 0 || DstBits == 0) {
++          if (NumDefs == 2)
++            SrcBits = DstBits = 64;
++        }
++        if (SrcBits == 0 || SrcBits > 64 || DstBits == 0)
++          continue;
++        LLT SrcTy = MRI.getType(Src);
++        if (!SrcTy.isValid() || !SrcTy.isScalar())
++          SrcTy = LLT::scalar(SrcBits);
++        MRI.setType(Src, SrcTy);
++        LLT DstTy = MRI.getType(MI.getOperand(0).getReg());
++        if (!DstTy.isValid() || !DstTy.isScalar())
++          DstTy = LLT::scalar(DstBits);
++        MachineIRBuilder MIB(MI);
++        for (unsigned I = 0; I < NumDefs; ++I) {
++          Register D = MI.getOperand(I).getReg();
++          if (!MRI.getType(D).isValid() || !MRI.getType(D).isScalar())
++            MRI.setType(D, DstTy);
++          Register Val;
++          unsigned Offset = I * DstBits;
++          if (Offset == 0) {
++            Val = MIB.buildTrunc(DstTy, Src).getReg(0);
++          } else if (Offset >= SrcBits) {
++            Val = MIB.buildConstant(DstTy, 0).getReg(0);
++          } else {
++            auto ShiftAmt = MIB.buildConstant(SrcTy, Offset);
++            auto Shifted = MIB.buildLShr(SrcTy, Src, ShiftAmt);
++            Val = MIB.buildTrunc(DstTy, Shifted).getReg(0);
++          }
++          MRI.replaceRegWith(D, Val);
++        }
++        MI.eraseFromParent();
++      }
++    }
++  }
++  // Erase any remaining dead wide merge/unmerge artifacts that could not be
++  // decomposed into representable SPIR-V operations.
++  for (MachineBasicBlock &MBB : MF) {
++    for (MachineInstr &MI : make_early_inc_range(MBB)) {
++      if (MI.getOpcode() == TargetOpcode::G_MERGE_VALUES) {
++        if (MI.getNumDefs() == 1 && MRI.use_nodbg_empty(MI.getOperand(0).getReg()))
++          MI.eraseFromParent();
++      } else if (MI.getOpcode() == TargetOpcode::G_UNMERGE_VALUES) {
++        bool AllDead = true;
++        for (unsigned I = 0, E = MI.getNumDefs(); I != E; ++I) {
++          if (!MRI.use_nodbg_empty(MI.getOperand(I).getReg())) {
++            AllDead = false;
++            break;
++          }
++        }
++        if (AllDead)
++          MI.eraseFromParent();
++      }
++    }
++  }
++  // Ensure every virtual register operand with a valid LLT has a SPIR-V type.
++  // Post-legalization rewrites can leave missing type assignments.
++  if (!MF.empty()) {
++    MachineIRBuilder MIB(*MF.begin(), MF.begin()->begin());
++    for (MachineBasicBlock &MBB : MF) {
++      for (MachineInstr &MI : MBB) {
++        for (MachineOperand &MO : MI.operands()) {
++          if (!MO.isReg())
++            continue;
++          Register R = MO.getReg();
++          if (!R || !R.isVirtual())
++            continue;
++          if (GR->getSPIRVTypeForVReg(R))
++            continue;
++          LLT Ty = MRI.getType(R);
++          if (!Ty.isValid())
++            continue;
++          SPIRVTypeInst SpvTy = nullptr;
++          if (Ty.isScalar()) {
++            unsigned BW = Ty.getSizeInBits();
++            if (BW == 1)
++              SpvTy = GR->getOrCreateSPIRVBoolType(MIB, false);
++            else
++              SpvTy = GR->getOrCreateSPIRVIntegerType(BW, MIB);
++          } else if (Ty.isVector()) {
++            LLT Elt = Ty.getElementType();
++            if (Elt.isScalar()) {
++              unsigned EBW = Elt.getSizeInBits();
++              SPIRVTypeInst ElemTy = (EBW == 1)
++                                         ? GR->getOrCreateSPIRVBoolType(MIB, false)
++                                         : GR->getOrCreateSPIRVIntegerType(EBW, MIB);
++              auto EC = Ty.getElementCount();
++              if (EC.isFixed())
++                SpvTy = GR->getOrCreateSPIRVVectorType(ElemTy, EC.getFixedValue(),
++                                                       MIB, false);
++            }
++          }
++          if (SpvTy)
++            GR->assignSPIRVTypeToVReg(SpvTy, R, MF);
++        }
++      }
++    }
++  }
++
+   registerSpirvTypeForNewInstructions(MF, GR);
+   ensureAssignTypeForTypeFolding(MF, GR);
++
++  // Ensure register classes are set for all typed virtual registers.
++  for (MachineBasicBlock &MBB : MF) {
++    for (MachineInstr &MI : MBB) {
++      for (MachineOperand &MO : MI.operands()) {
++        if (!MO.isReg())
++          continue;
++        Register R = MO.getReg();
++        if (!R || !R.isVirtual() || MRI.getRegClassOrNull(R))
++          continue;
++        SPIRVTypeInst Ty = GR->getSPIRVTypeForVReg(R);
++        if (!Ty)
++          continue;
++        if (const auto *RC = GR->getRegClass(Ty))
++          MRI.setRegClass(R, RC);
++      }
++    }
++  }
++
+   return true;
+ }
+ 
