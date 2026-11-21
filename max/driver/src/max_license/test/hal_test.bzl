@@ -12,8 +12,8 @@ Hard-coding `ZE_AFFINITY_MASK=1` in the rule would (a) hide a second device on a
 multi-GPU box and (b) make the suite non-portable to other Intel targets, so the mask
 is left to the environment.
 
-Multi-device (Bucket D) tests live in a separate PR (held on modular/modular#7623);
-the `hal_gpu_multi_*` macros are therefore not declared here.
+Bucket D (multi-device) tests use `hal_gpu_multi_test` / `hal_gpu_multi_comm_test`.
+They rely on `ZE_AFFINITY_MASK` being unset so both B60s are visible.
 """
 
 load("//bazel:api.bzl", "mojo_test")
@@ -53,4 +53,44 @@ def hal_gpu_test(name):
         env = _HAL_TEST_ENV,
         data = _HAL_TEST_DATA,
         deps = _HAL_TEST_DEPS,
+    )
+
+def hal_gpu_multi_test(name):
+    """Declares a multi-device (Bucket D) HAL test with BOTH B60s visible.
+
+    Same as `hal_gpu_test` but intended for multi-device runs; it relies on
+    `ZE_AFFINITY_MASK` being unset so the driver reports all devices.
+    """
+    mojo_test(
+        name = name + ".mojo.test",
+        srcs = [name + ".mojo"],
+        copts = [
+            # Compile the kernels for the Intel Xe2 (Battlemage) target.
+            "--target-accelerator=intel:xe2",
+        ],
+        tags = ["gpu", "manual"],
+        env = _HAL_TEST_ENV,
+        data = _HAL_TEST_DATA,
+        deps = _HAL_TEST_DEPS,
+    )
+
+# Bucket D tier 3 (collectives): like hal_gpu_multi_test but also links the real
+# `comm` library + `layout` (the host-staged allreduce / tensor primitives).
+_HAL_MULTI_COMM_DEPS = _HAL_TEST_DEPS + [
+    "//max/kernels/src/comm:comm",
+    "//max:layout",
+]
+
+def hal_gpu_multi_comm_test(name):
+    """A multi-device (Bucket D) collective test: both B60s + the comm library."""
+    mojo_test(
+        name = name + ".mojo.test",
+        srcs = [name + ".mojo"],
+        copts = [
+            "--target-accelerator=intel:xe2",
+        ],
+        tags = ["gpu", "manual"],
+        env = _HAL_TEST_ENV,
+        data = _HAL_TEST_DATA,
+        deps = _HAL_MULTI_COMM_DEPS,
     )
