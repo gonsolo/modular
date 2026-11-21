@@ -70,6 +70,16 @@ PATCHES = [
     # SPIR-V: a pointer vector element is extracted with the vector's component
     # type and cast to the pointee type its user needs.
     "//bazel/public-patches:llvm-spirv-pointer-vector-extract.patch",
+    # SPIR-V: legalize i128 scalar operations by narrowing to i64 pairs in
+    # GlobalISel, so i128-using code such as dragonbox float formatting can
+    # compile for SPIR-V targets without toolchain workarounds.
+    "//bazel/public-patches:llvm-spirv-i128-legalization.patch",
+    # SPIR-V: handle scalar G_UNMERGE_VALUES/G_MERGE_VALUES artifacts from
+    # i128 narrowing in post-legalizer type deduction.
+    "//bazel/public-patches:llvm-spirv-i128-postlegalizer.patch",
+    # SPIR-V: generalize G_PTR_ADD selection for runtime byte offsets
+    # (needed for i128 load/store narrowing).
+    "//bazel/public-patches:llvm-spirv-i128-ptradd.patch",
 ]
 
 # Upstream lit test inputs that no target reads: about three quarters of the
