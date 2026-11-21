@@ -1,0 +1,204 @@
+--- a/llvm/lib/Target/SPIRV/SPIRVLegalizerInfo.cpp
++++ b/llvm/lib/Target/SPIRV/SPIRVLegalizerInfo.cpp
+@@ -237,6 +237,8 @@
+           .fewerElementsIf(vectorElementCountIsGreaterThan(0, MaxVectorSize),
+                            LegalizeMutations::changeElementCountTo(
+                                0, ElementCount::getFixed(MaxVectorSize)))
++          .narrowScalarIf(scalarWiderThan(0, 64),
++                          LegalizeMutations::changeTo(0, LLT::scalar(64)))
+           .custom();
+       break;
+     }
+@@ -250,6 +252,8 @@
+       .fewerElementsIf(vectorElementCountIsGreaterThan(0, MaxVectorSize),
+                        LegalizeMutations::changeElementCountTo(
+                            0, ElementCount::getFixed(MaxVectorSize)))
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
+       .custom();
+ 
+   getActionDefinitionsBuilder(G_SELECT)
+@@ -259,6 +263,8 @@
+       .fewerElementsIf(vectorElementCountIsGreaterThan(0, MaxVectorSize),
+                        LegalizeMutations::changeElementCountTo(
+                            0, ElementCount::getFixed(MaxVectorSize)))
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
+       .custom();
+ 
+   getActionDefinitionsBuilder({G_FMA, G_STRICT_FMA})
+@@ -352,9 +358,18 @@
+       .scalarize(2)
+       .lower();
+ 
++  getActionDefinitionsBuilder(G_MERGE_VALUES)
++      // Scalar merge/unmerge pairs are legalization artifacts produced when
++      // narrowing wider scalars. Keep scalar merges legal so the artifact
++      // combiner or later passes can eliminate them.
++      .legalIf(isScalar(0))
++      .legalIf(LegalityPredicates::any(typeOfLongVectors(0, IsLongVecs),
++                                       typeOfLongVectors(1, IsLongVecs)));
++
+   // Illegal G_UNMERGE_VALUES instructions should be handled
+   // during the combine phase.
+   getActionDefinitionsBuilder(G_UNMERGE_VALUES)
++      .legalIf(isScalar(1))
+       .legalIf(LegalityPredicates::any(typeOfLongVectors(0, IsLongVecs),
+                                        typeOfLongVectors(1, IsLongVecs)))
+       .legalIf(vectorElementCountIsLessThanOrEqualTo(1, MaxVectorSize));
+@@ -376,6 +391,8 @@
+       .unsupportedIf(typeIs(1, p9))
+       .legalForCartesianProduct(allowedVectorTypes, allPtrs)
+       .legalForCartesianProduct(allPtrs, allPtrs)
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
+       .legalIf(isScalar(0))
+       .legalIf(typeOfLongVectors(0, IsLongVecs))
+       .custom();
+@@ -383,6 +400,8 @@
+   getActionDefinitionsBuilder({G_SMIN, G_SMAX, G_UMIN, G_UMAX, G_ABS,
+                                G_BITREVERSE, G_SADDSAT, G_UADDSAT, G_SSUBSAT,
+                                G_USUBSAT, G_SCMP, G_UCMP})
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
+       .legalFor(allIntScalars)
+       .legalFor(allowedIntVectorTypes)
+       .legalIf(ExtendedIntScalarsAndVectors)
+@@ -412,11 +431,17 @@
+                                 allScalarsAndVectors);
+ 
+   getActionDefinitionsBuilder(G_CTPOP)
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
+       .legalForCartesianProduct(allIntScalarsAndVectors)
+       .legalIf(ExtendedScalarsAndVectorsProduct)
+       .legalIf(typeOfLongVectors(0, IsLongVecs));
+ 
+   getActionDefinitionsBuilder({G_TRUNC, G_ZEXT, G_SEXT, G_ANYEXT})
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
++      .narrowScalarIf(scalarWiderThan(1, 64),
++                      LegalizeMutations::changeTo(1, LLT::scalar(64)))
+       .legalForCartesianProduct(allowedScalarsAndVectors)
+       .legalIf(ExtendedScalarsAndVectorsProduct)
+       .legalIf(typeOfLongVectors(0, IsLongVecs))
+@@ -426,6 +451,8 @@
+                            0, ElementCount::getFixed(MaxVectorSize)));
+ 
+   getActionDefinitionsBuilder(G_SEXT_INREG)
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
+       .lowerIf(typeOfLongVectors(0, IsLongVecs))
+       .moreElementsToNextPow2(0)
+       .fewerElementsIf(vectorElementCountIsGreaterThan(0, MaxVectorSize),
+@@ -434,6 +461,8 @@
+       .lower();
+ 
+   getActionDefinitionsBuilder(G_PHI)
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
+       .legalIf(typeOfLongVectors(0, IsLongVecs))
+       .fewerElementsIf(vectorElementCountIsGreaterThan(0, MaxVectorSize),
+                        LegalizeMutations::changeElementCountTo(
+@@ -450,6 +479,8 @@
+           typeInSet(1, allPtrsScalarsAndVectors)));
+ 
+   getActionDefinitionsBuilder({G_IMPLICIT_DEF, G_FREEZE})
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
+       .legalFor({s1, s128})
+       .legalFor(allFloatAndIntScalarsAndPtrs)
+       .legalFor(allowedVectorTypes)
+@@ -465,6 +496,8 @@
+   getActionDefinitionsBuilder({G_STACKSAVE, G_STACKRESTORE}).alwaysLegal();
+ 
+   getActionDefinitionsBuilder(G_INTTOPTR)
++      .narrowScalarIf(scalarWiderThan(1, 64),
++                      LegalizeMutations::changeTo(1, LLT::scalar(64)))
+       .legalForCartesianProduct(allPtrs, allIntScalars)
+       .legalIf(
+           all(typeInSet(0, allPtrs), typeOfExtendedScalars(1, IsExtendedInts)))
+@@ -476,6 +509,8 @@
+                DstTy.getNumElements() == SrcTy.getNumElements();
+       });
+   getActionDefinitionsBuilder(G_PTRTOINT)
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
+       .legalForCartesianProduct(allIntScalars, allPtrs)
+       .legalIf(
+           all(typeOfExtendedScalars(0, IsExtendedInts), typeInSet(1, allPtrs)))
+@@ -487,11 +522,15 @@
+                DstTy.getNumElements() == SrcTy.getNumElements();
+       });
+   getActionDefinitionsBuilder(G_PTR_ADD)
++      .narrowScalarIf(scalarWiderThan(1, 64),
++                      LegalizeMutations::changeTo(1, LLT::scalar(64)))
+       .legalForCartesianProduct(allPtrs, allIntScalars)
+       .legalIf(
+           all(typeInSet(0, allPtrs), typeOfExtendedScalars(1, IsExtendedInts)));
+ 
+   getActionDefinitionsBuilder(G_PTRMASK)
++      .narrowScalarIf(scalarWiderThan(1, 64),
++                      LegalizeMutations::changeTo(1, LLT::scalar(64)))
+       .legalForCartesianProduct(allPtrs, allIntScalars)
+       .legalIf(
+           all(typeInSet(0, allPtrs), typeOfExtendedScalars(1, IsExtendedInts)))
+@@ -512,6 +551,8 @@
+       .fewerElementsIf(vectorElementCountIsGreaterThan(1, MaxVectorSize),
+                        LegalizeMutations::changeElementCountTo(
+                            1, ElementCount::getFixed(MaxVectorSize)))
++      .narrowScalarIf(scalarWiderThan(1, 64),
++                      LegalizeMutations::changeTo(1, LLT::scalar(64)))
+       .legalIf([IsExtendedInts](const LegalityQuery &Query) {
+         const LLT Ty = Query.Types[1];
+         return IsExtendedInts && Ty.isValid() && !Ty.isPointerOrPointerVector();
+@@ -547,9 +588,22 @@
+   getActionDefinitionsBuilder(G_PREFETCH).alwaysLegal();
+ 
+   getActionDefinitionsBuilder({G_UADDO, G_USUBO, G_UMULO, G_SMULO})
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
+       .alwaysLegal();
+ 
+-  getActionDefinitionsBuilder({G_SADDO, G_SSUBO}).lower();
++  getActionDefinitionsBuilder({G_SADDO, G_SSUBO})
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
++      .lower();
++
++  // SPIR-V has no add/sub-with-carry-in instructions. narrowScalarAddSub
++  // emits these when splitting wider-than-native scalars; lower them to
++  // basic arithmetic for the narrowed scalar parts.
++  getActionDefinitionsBuilder({G_UADDE, G_USUBE, G_SADDE, G_SSUBE})
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
++      .lowerFor({s1, s8, s16, s32, s64});
+ 
+   // Lowering widens s64 to s128, which needs
+   // SPV_ALTERA_arbitrary_precision_integers. Mark s64 unsupported otherwise.
+@@ -636,13 +690,24 @@
+   if (ST.canUseExtInstSet(SPIRV::InstructionSet::OpenCL_std)) {
+     getActionDefinitionsBuilder(
+         {G_CTTZ, G_CTTZ_ZERO_POISON, G_CTLZ, G_CTLZ_ZERO_POISON})
++        .narrowScalarIf(scalarWiderThan(0, 64),
++                        LegalizeMutations::changeTo(0, LLT::scalar(64)))
+         .legalForCartesianProduct(allIntScalarsAndVectors,
+                                   allIntScalarsAndVectors);
+ 
+     // Struct return types become a single scalar, so cannot easily legalize.
+-    getActionDefinitionsBuilder({G_SMULH, G_UMULH}).alwaysLegal();
++    getActionDefinitionsBuilder({G_SMULH, G_UMULH})
++        .narrowScalarIf(scalarWiderThan(0, 64),
++                        LegalizeMutations::changeTo(0, LLT::scalar(64)))
++        .alwaysLegal();
+   }
+ 
++  getActionDefinitionsBuilder(G_CONSTANT)
++      .narrowScalarIf(scalarWiderThan(0, 64),
++                      LegalizeMutations::changeTo(0, LLT::scalar(64)))
++      .legalFor(allScalars)
++      .legalFor(allPtrs);
++
+   getActionDefinitionsBuilder(G_IS_FPCLASS).custom();
+ 
+   getActionDefinitionsBuilder({G_INTRINSIC, G_INTRINSIC_CONVERGENT,
