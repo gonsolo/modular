@@ -80,6 +80,9 @@ PATCHES = [
     # SPIR-V: generalize G_PTR_ADD selection for runtime byte offsets
     # (needed for i128 load/store narrowing).
     "//bazel/public-patches:llvm-spirv-i128-ptradd.patch",
+    # SPIR-V: allow BFloat16 type emission on Intel targets via
+    # SPV_KHR_bfloat16 when the environment supports it.
+    "//bazel/public-patches:llvm-spirv-bfloat16-extension.patch",
 ]
 
 # Upstream lit test inputs that no target reads: about three quarters of the
