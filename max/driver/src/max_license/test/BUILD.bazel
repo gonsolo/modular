@@ -52,6 +52,7 @@ hal_gpu_test("hal_test_dim")
 
 # SIMD-width introspection (host-only, no kernel).
 hal_gpu_test("hal_test_targetinfo")
+hal_gpu_test("hal_test_spirv_codegen")
 
 # --- Bucket A: collectives (warp / block) -----------------------------------
 
