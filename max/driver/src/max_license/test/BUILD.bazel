@@ -1,0 +1,77 @@
+"""Intel Level Zero (B60 / Xe2) HAL device-execution test suite.
+
+These are the portable *purpose* tests from the NVIDIA/AMD HAL suites, re-expressed
+for the Intel Level Zero backend and validated on the Intel Arc Pro B60. Each is
+self-contained (deps = the HAL `max` + `std`, minimal-HAL style) and compiles the
+kernels for `intel:xe2`.
+
+Device selection
+----------------
+`ZE_AFFINITY_MASK` is left unset (see `hal_test.bzl`): the suite runs on whatever
+device(s) the driver reports. On a single-B60 box that is the natural default; on a
+multi-GPU box set `ZE_AFFINITY_MASK` via `--test_env=ZE_AFFINITY_MASK=<mask>` to pin
+one device.
+
+Local-memory / `.SHARED` + barrier (modular/modular#7601)
+---------------------------------------------------------
+Work-group tests that stage data in TRUE local (shared) memory
+(`unsafe_stack_allocation[...address_space=.SHARED]`) and cross a work-group
+`barrier()` are KNOWN-FLAKY on this driver/IGC build: under load they can read back
+zeroed staged values. The root cause is below IGC fence emission (IGC does emit the
+correct SLM + global fences + work-group barrier), i.e. in the driver's execution of
+those fences / HW SLM coherency on Battlemage. See the #7601 investigation (the
+`docs/investigation-7601-*` write-ups and the issue's comment trail). This PR does
+NOT ship local-memory work-group tests, so the suite is safe to run concurrently; the
+flakiness is documented here so it is not mistaken for a test-runner artifact.
+"""
+
+load("//max/driver/src/max_license/test:hal_test.bzl", "hal_gpu_test")
+
+# --- Bucket A: portable primitives -------------------------------------------
+
+# Scalar by-value kernel args + host<->device mapping.
+hal_gpu_test("hal_test_add_constant")
+
+# Portable vectorized load/store (width=4). The strided-gather part is held on
+# modular/modular#7620 (G_STEP_VECTOR not legalizable by the SPIR-V/IGC backend).
+hal_gpu_test("hal_test_buffer_io")
+
+# Portable FastDiv value correctness.
+hal_gpu_test("hal_test_fast_div")
+
+# --- Bucket A: index / identity primitives ----------------------------------
+
+# thread_idx / block_idx primitives + buffer/queue APIs.
+hal_gpu_test("hal_test_id")
+
+# lane_id() primitive.
+hal_gpu_test("hal_test_laneid")
+
+# Dim (launch-config) string formatting (host-only, no kernel).
+hal_gpu_test("hal_test_dim")
+
+# SIMD-width introspection (host-only, no kernel).
+hal_gpu_test("hal_test_targetinfo")
+hal_gpu_test("hal_test_spirv_codegen")
+
+# --- Bucket A: collectives (warp / block) -----------------------------------
+
+# block-level barrier() op (on a global buffer; NOT the local-memory pattern above).
+hal_gpu_test("hal_test_barrier")
+
+# warp.sum + block.sum (block reduction with broadcast).
+hal_gpu_test("hal_test_sum")
+
+# warp.prefix_sum + block.prefix_sum (inclusive/exclusive scans).
+hal_gpu_test("hal_test_prefix_sum")
+
+# Comprehensive warp-shuffle stress (shuffle_idx/up/down/xor, reduce, lane_group).
+hal_gpu_test("hal_test_shuffle")
+
+# --- Bucket A: SIMD vector ops ----------------------------------------------
+
+# SIMD.insert[] with width-8 SIMD vectors.
+hal_gpu_test("hal_test_simd_insert")
+
+# SIMD width-4 loads + in-lane reduce_add().
+hal_gpu_test("hal_test_simd_reduction")
