@@ -50,7 +50,7 @@ Not tested: the MAX graph compiler and the kernels library, other Intel GPUs.
 
   IGC is pinned to the master commit the fixes are tested on, because release
   v2.42.6 crashes compiling large kernels; it moves to the next release. The
-  fixes: IGC [#460](https://github.com/intel/intel-graphics-compiler/pull/460),
+  fixes, all in review: IGC [#460](https://github.com/intel/intel-graphics-compiler/pull/460),
   [#463](https://github.com/intel/intel-graphics-compiler/pull/463),
   [#465](https://github.com/intel/intel-graphics-compiler/pull/465),
   [#467](https://github.com/intel/intel-graphics-compiler/pull/467),
@@ -60,17 +60,21 @@ Not tested: the MAX graph compiler and the kernels library, other Intel GPUs.
   [#1037](https://github.com/intel/compute-runtime/pull/1037). Small kernels also
   run on the stock driver.
 
-The LLVM fixes are carried as patches in `bazel/public-patches/llvm-spirv-*.patch`:
-[llvm#227599](https://github.com/llvm/llvm-project/pull/227599) (merged after the
-pinned LLVM),
+The LLVM fixes are carried as patches in `bazel/public-patches/llvm-spirv-*.patch`
+until the pinned LLVM includes them. Merged upstream:
+[llvm#227599](https://github.com/llvm/llvm-project/pull/227599),
 [#236368](https://github.com/llvm/llvm-project/pull/236368),
 [#236369](https://github.com/llvm/llvm-project/pull/236369),
-[#236370](https://github.com/llvm/llvm-project/pull/236370),
+[#236370](https://github.com/llvm/llvm-project/pull/236370) and
+[#241166](https://github.com/llvm/llvm-project/pull/241166). In review:
 [#237724](https://github.com/llvm/llvm-project/pull/237724),
-[#241166](https://github.com/llvm/llvm-project/pull/241166),
 [#241167](https://github.com/llvm/llvm-project/pull/241167),
 [#241168](https://github.com/llvm/llvm-project/pull/241168) and
 [#241169](https://github.com/llvm/llvm-project/pull/241169).
+
+Fixes found with larger applications that this branch does not need: LLVM
+[#241849](https://github.com/llvm/llvm-project/pull/241849) and IGC
+[#461](https://github.com/intel/intel-graphics-compiler/pull/461).
 
 ## Build
 
@@ -154,7 +158,6 @@ It prints `device: Intel(R) Arc(TM) B580 Graphics` and `wrong: 0`.
 
 - Kernel arguments of type `Int`/`UInt` are rejected by the HAL compatibility
   layer; pass `Int64`.
-- GPU `print` is not supported.
 - Large kernels can need several hundred MiB of private memory each; Level Zero
   reserves it per kernel, so big applications can run out of VRAM
   ([compute-runtime#1037](https://github.com/intel/compute-runtime/pull/1037)
