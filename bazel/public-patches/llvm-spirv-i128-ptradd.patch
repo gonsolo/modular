@@ -1,0 +1,278 @@
+--- a/llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp
++++ b/llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp
+@@ -1281,16 +1281,9 @@
+   case TargetOpcode::G_PTRMASK:
+     return selectPtrMask(ResVReg, ResType, I);
+   case TargetOpcode::G_PTR_ADD: {
+-    // Currently, we get G_PTR_ADD only applied to global variables.
+     assert(I.getOperand(1).isReg() && I.getOperand(2).isReg());
+     Register GV = I.getOperand(1).getReg();
+-    MachineRegisterInfo::def_instr_iterator II = MRI->def_instr_begin(GV);
+-    (void)II;
+-    assert(((*II).getOpcode() == TargetOpcode::G_GLOBAL_VALUE ||
+-            (*II).getOpcode() == TargetOpcode::COPY ||
+-            (*II).getOpcode() == SPIRV::OpVariable ||
+-            (*II).getOpcode() == SPIRV::OpUntypedVariableKHR) &&
+-           getImm(I.getOperand(2), MRI));
++    Register Off = I.getOperand(2).getReg();
+     // It may be the initialization of a global variable.
+     bool IsGVInit = false;
+     for (MachineRegisterInfo::use_instr_iterator
+@@ -1306,40 +1299,99 @@
+       }
+     }
+     MachineBasicBlock &BB = *I.getParent();
++    MachineInstr *BaseDef = MRI->getVRegDef(GV);
++    auto IsGlobalLikeBase = [&]() {
++      if (!BaseDef)
++        return false;
++      unsigned Opc = BaseDef->getOpcode();
++      return Opc == TargetOpcode::G_GLOBAL_VALUE ||
++             Opc == TargetOpcode::COPY ||
++             Opc == SPIRV::OpVariable ||
++             Opc == SPIRV::OpUntypedVariableKHR;
++    };
+     // An untyped result needs OpUntypedInBoundsPtrAccessChainKHR, which spells
+     // out the Base Type. The offset of G_PTR_ADD is a byte count, so the Base
+-    // Type is i8 and the offset is the Element index as is. The opcode is
+-    // picked by the result type alone because an untyped access chain accepts
+-    // a typed base while a typed access chain rejects an untyped result.
++    // Type is i8 and the offset is the Element index as is.
+     SPIRVTypeInst GVType = GR.getSPIRVTypeForVReg(GV);
+     const bool UseUntypedPointers =
+         ResType->getOpcode() == SPIRV::OpTypeUntypedPointerKHR;
+     if (UseUntypedPointers) {
+-      BuildMI(BB, I, I.getDebugLoc(), TII.get(SPIRV::OpSpecConstantOp))
++      if (IsGVInit || (IsGlobalLikeBase() && getImm(I.getOperand(2), MRI))) {
++        BuildMI(BB, I, I.getDebugLoc(), TII.get(SPIRV::OpSpecConstantOp))
++            .addDef(ResVReg)
++            .addUse(GR.getSPIRVTypeID(ResType))
++            .addImm(static_cast<uint32_t>(
++                SPIRV::Opcode::UntypedInBoundsPtrAccessChainKHR))
++            .addUse(
++                GR.getSPIRVTypeID(GR.getOrCreateSPIRVIntegerType(8, I, TII)))
++            .addUse(GV)
++            .addUse(Off)
++            .constrainAllUses(TII, TRI, RBI);
++        return true;
++      }
++      BuildMI(BB, I, I.getDebugLoc(),
++              TII.get(SPIRV::OpUntypedInBoundsPtrAccessChainKHR))
+           .addDef(ResVReg)
+           .addUse(GR.getSPIRVTypeID(ResType))
+-          .addImm(static_cast<uint32_t>(
+-              SPIRV::Opcode::UntypedInBoundsPtrAccessChainKHR))
+           .addUse(GR.getSPIRVTypeID(GR.getOrCreateSPIRVIntegerType(8, I, TII)))
+           .addUse(GV)
+-          .addUse(I.getOperand(2).getReg())
++          .addUse(Off)
+           .constrainAllUses(TII, TRI, RBI);
+       return true;
+     }
+     if (!IsGVInit) {
+       SPIRVTypeInst GVPointeeType = GR.getPointeeType(GVType);
+       SPIRVTypeInst ResPointeeType = GR.getPointeeType(ResType);
+-      if (GVPointeeType && ResPointeeType && GVPointeeType != ResPointeeType) {
+-        // Build a new virtual register that is associated with the required
+-        // data type.
++      // For general runtime pointer arithmetic (e.g. narrowed load/store
++      // splitting), treat the offset as a byte offset via an i8 pointer.
++      if (!IsGlobalLikeBase() || !getImm(I.getOperand(2), MRI) ||
++          !GVPointeeType || !ResPointeeType ||
++          GVPointeeType != ResPointeeType) {
++        MachineIRBuilder MIRBuilder(I);
++        SPIRV::StorageClass::StorageClass SC =
++            GR.getPointerStorageClass(GVType ? GVType : ResType);
++        SPIRVTypeInst I8Ty = GR.getOrCreateSPIRVIntegerType(8, MIRBuilder);
++        SPIRVTypeInst I8PtrTy =
++            GR.getOrCreateSPIRVPointerType(I8Ty, MIRBuilder, SC);
++        Register BaseI8 = GV;
++        if (!GVType || GR.getPointeeType(GVType) != I8Ty) {
++          BaseI8 = MRI->createVirtualRegister(&SPIRV::pIDRegClass);
++          GR.assignSPIRVTypeToVReg(I8PtrTy, BaseI8, *I.getParent()->getParent());
++          BuildMI(BB, I, I.getDebugLoc(), TII.get(SPIRV::OpBitcast))
++              .addDef(BaseI8)
++              .addUse(GR.getSPIRVTypeID(I8PtrTy))
++              .addUse(GV)
++              .constrainAllUses(TII, TRI, RBI);
++        }
++        Register ResPtr = ResVReg;
++        if (ResType != I8PtrTy) {
++          ResPtr = MRI->createVirtualRegister(&SPIRV::pIDRegClass);
++          GR.assignSPIRVTypeToVReg(I8PtrTy, ResPtr, *I.getParent()->getParent());
++        }
++        unsigned PtrAccessOp = STI.isLogicalSPIRV()
++                                   ? SPIRV::OpInBoundsAccessChain
++                                   : SPIRV::OpInBoundsPtrAccessChain;
++        BuildMI(BB, I, I.getDebugLoc(), TII.get(PtrAccessOp))
++            .addDef(ResPtr)
++            .addUse(GR.getSPIRVTypeID(I8PtrTy))
++            .addUse(BaseI8)
++            .addUse(Off)
++            .constrainAllUses(TII, TRI, RBI);
++        if (ResPtr != ResVReg)
++          BuildMI(BB, I, I.getDebugLoc(), TII.get(SPIRV::OpBitcast))
++              .addDef(ResVReg)
++              .addUse(GR.getSPIRVTypeID(ResType))
++              .addUse(ResPtr)
++              .constrainAllUses(TII, TRI, RBI);
++        return true;
++      }
++      // Existing constant/global-like runtime cases with matching pointee types.
++      SPIRVTypeInst GVPointeeType2 = GR.getPointeeType(GVType);
++      SPIRVTypeInst ResPointeeType2 = GR.getPointeeType(ResType);
++      if (GVPointeeType2 && ResPointeeType2 &&
++          GVPointeeType2 != ResPointeeType2) {
+         Register NewVReg = MRI->createGenericVirtualRegister(MRI->getType(GV));
+         MRI->setRegClass(NewVReg, MRI->getRegClass(GV));
+-        //  Having a correctly typed base we are ready to build the actually
+-        //  required GEP. It may not be a constant though, because all Operands
+-        //  of OpSpecConstantOp is to originate from other const instructions,
+-        //  and only the AccessChain named opcodes accept a global OpVariable
+-        //  instruction. We can't use an AccessChain opcode because of the type
+-        //  mismatch between result and base types.
+         if (!GR.isBitcastCompatible(ResType, GVType))
+           return diagnoseUnsupported(
+               I, "incompatible result and operand types in a bitcast");
+@@ -1356,7 +1408,7 @@
+             .addDef(ResVReg)
+             .addUse(ResTypeReg)
+             .addUse(NewVReg)
+-            .addUse(I.getOperand(2).getReg())
++            .addUse(Off)
+             .constrainAllUses(TII, TRI, RBI);
+       } else {
+         BuildMI(BB, I, I.getDebugLoc(), TII.get(SPIRV::OpSpecConstantOp))
+@@ -1365,14 +1417,12 @@
+             .addImm(
+                 static_cast<uint32_t>(SPIRV::Opcode::InBoundsPtrAccessChain))
+             .addUse(GV)
+-            .addUse(I.getOperand(2).getReg())
++            .addUse(Off)
+             .constrainAllUses(TII, TRI, RBI);
+       }
+       return true;
+     }
+-    // It's possible to translate G_PTR_ADD to OpSpecConstantOp: either to
+-    // initialize a global variable with a constant expression (e.g., the test
+-    // case opencl/basic/progvar_prog_scope_init.ll), or for another use case
++    // Initialization of a global variable with a constant expression.
+     Register Idx = buildZerosVal(GR.getOrCreateSPIRVIntegerType(32, I, TII), I);
+     auto MIB = BuildMI(BB, I, I.getDebugLoc(), TII.get(SPIRV::OpSpecConstantOp))
+                    .addDef(ResVReg)
+@@ -1381,7 +1431,7 @@
+                        SPIRV::Opcode::InBoundsPtrAccessChain))
+                    .addUse(GV)
+                    .addUse(Idx)
+-                   .addUse(I.getOperand(2).getReg());
++                   .addUse(Off);
+     MIB.constrainAllUses(TII, TRI, RBI);
+     return true;
+   }
+@@ -2047,10 +2097,28 @@
+       return selectAtomicLoad(ResVReg, ResType, I);
+   }
+ 
++  Register LoadPtr = Ptr;
++  SPIRVTypeInst PtrSpvTy = GR.getSPIRVTypeForVReg(Ptr);
++  if (PtrSpvTy) {
++    SPIRVTypeInst PointeeTy = GR.getPointeeType(PtrSpvTy);
++    if (PointeeTy && PointeeTy != ResType) {
++      auto SC = GR.getPointerStorageClass(PtrSpvTy);
++      SPIRVTypeInst ExpectedPtrTy =
++          GR.getOrCreateSPIRVPointerType(ResType, MIRBuilder, SC);
++      LoadPtr = MRI->createVirtualRegister(&SPIRV::pIDRegClass);
++      GR.assignSPIRVTypeToVReg(ExpectedPtrTy, LoadPtr, MIRBuilder.getMF());
++      BuildMI(*I.getParent(), MIRBuilder.getInsertPt(), I.getDebugLoc(),
++              TII.get(SPIRV::OpBitcast))
++          .addDef(LoadPtr)
++          .addUse(GR.getSPIRVTypeID(ExpectedPtrTy))
++          .addUse(Ptr)
++          .constrainAllUses(TII, TRI, RBI);
++    }
++  }
+   auto MIB = MIRBuilder.buildInstr(SPIRV::OpLoad)
+                  .addDef(ResVReg)
+                  .addUse(GR.getSPIRVTypeID(ResType))
+-                 .addUse(Ptr);
++                 .addUse(LoadPtr);
+   if (!I.getNumMemOperands()) {
+     assert(I.getOpcode() == TargetOpcode::G_INTRINSIC_W_SIDE_EFFECTS ||
+            I.getOpcode() ==
+@@ -2285,7 +2353,26 @@
+         I, "store into a read-only SPIR-V storage class is not allowed");
+ 
+   MachineIRBuilder MIRBuilder(I);
+-  auto MIB = MIRBuilder.buildInstr(SPIRV::OpStore).addUse(Ptr).addUse(StoreVal);
++  Register StorePtr = Ptr;
++  SPIRVTypeInst PtrSpvTy = GR.getSPIRVTypeForVReg(Ptr);
++  SPIRVTypeInst StoreValTy = GR.getSPIRVTypeForVReg(StoreVal);
++  if (PtrSpvTy && StoreValTy) {
++    SPIRVTypeInst PointeeTy = GR.getPointeeType(PtrSpvTy);
++    if (PointeeTy && PointeeTy != StoreValTy) {
++      auto SC = GR.getPointerStorageClass(PtrSpvTy);
++      SPIRVTypeInst ExpectedPtrTy =
++          GR.getOrCreateSPIRVPointerType(StoreValTy, MIRBuilder, SC);
++      StorePtr = MRI->createVirtualRegister(&SPIRV::pIDRegClass);
++      GR.assignSPIRVTypeToVReg(ExpectedPtrTy, StorePtr, MIRBuilder.getMF());
++      BuildMI(*I.getParent(), MIRBuilder.getInsertPt(), I.getDebugLoc(),
++              TII.get(SPIRV::OpBitcast))
++          .addDef(StorePtr)
++          .addUse(GR.getSPIRVTypeID(ExpectedPtrTy))
++          .addUse(Ptr)
++          .constrainAllUses(TII, TRI, RBI);
++    }
++  }
++  auto MIB = MIRBuilder.buildInstr(SPIRV::OpStore).addUse(StorePtr).addUse(StoreVal);
+   if (!I.getNumMemOperands()) {
+     assert(I.getOpcode() == TargetOpcode::G_INTRINSIC_W_SIDE_EFFECTS ||
+            I.getOpcode() ==
+@@ -2767,22 +2854,33 @@
+                                                    unsigned Opcode) const {
+   Type *ResTy = nullptr;
+   StringRef ResName;
+-  if (!GR.findValueAttrs(&I, ResTy, ResName))
+-    return diagnoseUnsupported(
+-        I,
+-        "Not enough info to select the arithmetic with overflow instruction");
+-  if (!ResTy || !ResTy->isStructTy())
+-    return diagnoseUnsupported(I,
+-                               "Expect struct type result for the arithmetic "
+-                               "with overflow instruction");
+-  // "Result Type must be from OpTypeStruct. The struct must have two members,
+-  // and the two members must be the same type."
+-  Type *ResElemTy = cast<StructType>(ResTy)->getElementType(0);
+-  ResTy = StructType::get(ResElemTy, ResElemTy);
+-  // Build SPIR-V types and constant(s) if needed.
++  bool HaveValueAttrs = GR.findValueAttrs(&I, ResTy, ResName);
+   MachineIRBuilder MIRBuilder(I);
+-  SPIRVTypeInst StructType = GR.getOrCreateSPIRVType(
+-      ResTy, MIRBuilder, SPIRV::AccessQualifier::ReadWrite, false);
++  SPIRVTypeInst StructType = nullptr;
++  if (HaveValueAttrs && ResTy && ResTy->isStructTy()) {
++    // "Result Type must be from OpTypeStruct. The struct must have two members,
++    // and the two members must be the same type."
++    llvm::Type *ResElemTy =
++        llvm::cast<llvm::StructType>(ResTy)->getElementType(0);
++    ResTy = llvm::StructType::get(ResElemTy, ResElemTy);
++    StructType = GR.getOrCreateSPIRVType(
++        ResTy, MIRBuilder, SPIRV::AccessQualifier::ReadWrite, false);
++  } else {
++    // Fallback for instructions created during legalization (e.g. i128
++    // narrowing): synthesize a SPIR-V struct {ResType, ResType}.
++    const llvm::Type *ElemLLVMTy = GR.getTypeForSPIRVType(ResType);
++    llvm::LLVMContext &Ctx = MIRBuilder.getMF().getFunction().getContext();
++    if (!ElemLLVMTy) {
++      unsigned BW = GR.getScalarOrVectorBitWidth(ResType);
++      ElemLLVMTy = (BW == 1) ? llvm::Type::getInt1Ty(Ctx)
++                             : llvm::Type::getIntNTy(Ctx, BW);
++    }
++    llvm::Type *PairTy = llvm::StructType::get(
++        const_cast<llvm::Type *>(ElemLLVMTy),
++        const_cast<llvm::Type *>(ElemLLVMTy));
++    StructType = GR.getOrCreateSPIRVType(
++        PairTy, MIRBuilder, SPIRV::AccessQualifier::ReadWrite, false);
++  }
+   assert(I.getNumDefs() > 1 && "Not enought operands");
+   SPIRVTypeInst BoolType = GR.getOrCreateSPIRVBoolType(I, TII);
+   unsigned N = GR.getScalarOrVectorComponentCount(ResType);
